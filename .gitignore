@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+main_cache/
+
+build/
+dist/
+*.spec
+
+.DS_Store
+Thumbs.db
+ORCHESTRATOR_PLAN.md
+.claude/
+nul

@@ -1,0 +1,6 @@
+textual>=0.58.0
+customtkinter>=5.2.0
+pyte>=0.8.2
+pexpect>=4.9.0; platform_system != "Windows"
+pywinpty>=2.0.13; platform_system == "Windows"
+tkinterdnd2>=0.4.3
