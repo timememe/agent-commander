@@ -17,6 +17,16 @@ This repository is currently focused on the first public version for testing and
 - Chat Mode file explorer (including basic drag and drop).
 - Setup Wizard and preflight checks for available agent CLIs.
 
+## Screenshots
+
+### Chat Mode
+
+![Chat Mode](chat_mode.png)
+
+### Grid Mode
+
+![Grid Mode](grid_mode.png)
+
 ## System Requirements
 
 - OS: Windows 10/11 (primary target for current version).
@@ -87,4 +97,3 @@ run_agent_commander.bat --setup-only
 ## Feedback
 
 Issues and UX feedback are welcome as we prepare for wider open-source testing.
-
