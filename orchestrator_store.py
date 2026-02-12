@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -31,6 +32,17 @@ class ProjectRecord:
     status: str
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class EventRecord:
+    id: int
+    pane_id: str
+    task_id: int
+    agent: str
+    event_type: str
+    payload_json: str
+    created_at: str
 
 
 class OrchestratorStore:
@@ -91,6 +103,15 @@ class OrchestratorStore:
                     payload_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_events_created_at
+                ON events(created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_events_pane_id_id
+                ON events(pane_id, id);
+
+                CREATE INDEX IF NOT EXISTS idx_events_task_id_id
+                ON events(task_id, id);
 
                 CREATE TABLE IF NOT EXISTS policies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -328,6 +349,100 @@ class OrchestratorStore:
                 "SELECT pane_id, project_id FROM pane_project_bindings ORDER BY pane_id"
             ).fetchall()
         return {str(row["pane_id"]): int(row["project_id"]) for row in rows}
+
+    # Event log (foundation for chat-like UI transcript)
+    def append_event(
+        self,
+        pane_id: str,
+        event_type: str,
+        payload: object = None,
+        task_id: int = 0,
+        agent: str = "",
+    ) -> int:
+        payload_json = self._encode_payload(payload)
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO events (pane_id, task_id, agent, event_type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (pane_id, int(task_id), agent, event_type, payload_json, utc_now_iso()),
+            )
+            return int(cur.lastrowid)
+
+    def list_events(
+        self,
+        limit: int = 200,
+        pane_id: Optional[str] = None,
+        task_id: Optional[int] = None,
+        event_types: Optional[list[str]] = None,
+        after_id: Optional[int] = None,
+    ) -> list[EventRecord]:
+        safe_limit = max(1, min(int(limit), 2000))
+        query = (
+            "SELECT id, pane_id, task_id, agent, event_type, payload_json, created_at "
+            "FROM events"
+        )
+        clauses: list[str] = []
+        args: list[object] = []
+
+        if pane_id is not None:
+            clauses.append("pane_id = ?")
+            args.append(pane_id)
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            args.append(int(task_id))
+        if after_id is not None:
+            clauses.append("id > ?")
+            args.append(int(after_id))
+        if event_types:
+            placeholders = ", ".join("?" for _ in event_types)
+            clauses.append(f"event_type IN ({placeholders})")
+            args.extend(event_types)
+
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id ASC LIMIT ?"
+        args.append(safe_limit)
+
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(args)).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def list_events_since(
+        self,
+        event_id: int,
+        limit: int = 200,
+        pane_id: Optional[str] = None,
+        task_id: Optional[int] = None,
+        event_types: Optional[list[str]] = None,
+    ) -> list[EventRecord]:
+        return self.list_events(
+            limit=limit,
+            pane_id=pane_id,
+            task_id=task_id,
+            event_types=event_types,
+            after_id=event_id,
+        )
+
+    def _encode_payload(self, payload: object) -> str:
+        if payload is None:
+            payload = {}
+        try:
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            return json.dumps({"value": str(payload)}, ensure_ascii=False)
+
+    def _row_to_event(self, row: sqlite3.Row) -> EventRecord:
+        return EventRecord(
+            id=int(row["id"]),
+            pane_id=str(row["pane_id"]),
+            task_id=int(row["task_id"]),
+            agent=str(row["agent"]),
+            event_type=str(row["event_type"]),
+            payload_json=str(row["payload_json"]),
+            created_at=str(row["created_at"]),
+        )
 
     def _row_to_project(self, row: sqlite3.Row) -> ProjectRecord:
         return ProjectRecord(

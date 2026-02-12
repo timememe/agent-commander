@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font
 import json
@@ -27,8 +28,55 @@ except Exception:
 
 from datetime import datetime
 from orchestrator_store import OrchestratorStore, TaskRecord, ProjectRecord, utc_now_iso
+from event_contract import (
+    DefaultSignalAdapter,
+    SIGNAL_ASSISTANT_MESSAGE,
+    SIGNAL_CHOICE_REQUEST,
+    SIGNAL_CHOICE_SELECTED,
+    SIGNAL_SYSTEM_EVENT,
+    SIGNAL_USER_MESSAGE,
+    extract_choice_payload as extract_signal_choice_payload,
+    normalize_choice_payload as normalize_signal_choice_payload,
+)
 
 ANSI_RE = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
+SPINNER_BRAILLE_RE = re.compile(r"[\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f]")
+BOX_UI_LINE_RE = re.compile(r"^[\s\u2500-\u257f\u2580-\u259f]+$")
+FILE_HINT_LINE_RE = re.compile(r"^\s*\d+\s+\S+\s+files?\s*$", re.IGNORECASE)
+STATUS_MEM_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:kb|mb|gb)\b", re.IGNORECASE)
+STATUS_RATE_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:tok/s|tokens/s|it/s)\b", re.IGNORECASE)
+
+
+def _normalize_terminal_signature(text: str) -> str:
+    normalized = text.lower()
+    normalized = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", "<time>", normalized)
+    normalized = re.sub(r"\b\d+%\b", "<pct>", normalized)
+    normalized = STATUS_MEM_RE.sub("<mem>", normalized)
+    normalized = STATUS_RATE_RE.sub("<rate>", normalized)
+    normalized = SPINNER_BRAILLE_RE.sub("", normalized)
+    normalized = re.sub(r"[\u2580-\u259f]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized[:800]
+
+
+def _is_terminal_repaint_noise(text: str) -> bool:
+    meaningful_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if BOX_UI_LINE_RE.fullmatch(line):
+            continue
+        compact = re.sub(r"\s+", " ", line).strip()
+        lower = compact.lower()
+        if "type your message" in lower and "@path/to/file" in lower:
+            continue
+        if FILE_HINT_LINE_RE.fullmatch(compact):
+            continue
+        if ("/model" in lower or "no sandbox" in lower) and STATUS_MEM_RE.search(lower):
+            continue
+        meaningful_lines.append(compact)
+    return len(meaningful_lines) == 0
 
 # ── Color palette ──────────────────────────────────────────────────────────────
 
@@ -98,6 +146,8 @@ COMMON_CACHE_DIRNAME = "main_cache"
 SETUP_STATE_FILENAME = "agent_setup.json"
 LAUNCHER_CHECK_FILENAME = "launcher_agent_check.json"
 STARTER_WORKSPACE_DIRNAME = "starter_workspace"
+EVENT_TEXT_LIMIT = 12000
+CHAT_EVENT_LIMIT = 500
 
 # ── Slash commands per agent ──────────────────────────────────────────────────
 
@@ -391,6 +441,8 @@ class AgentPane(ctk.CTkFrame):
         self._prev_render = ""
         self._fallback_lines: list[str] = []
         self._fallback_carry = ""
+        self._last_output_event_signature = ""
+        self._last_output_event_ts = 0.0
 
         # ── Title label (clickable — opens assign menu) ──────────────────
         self.title_label = ctk.CTkLabel(
@@ -654,9 +706,11 @@ class AgentPane(ctk.CTkFrame):
 
     def _poll_output(self) -> None:
         dirty = False
+        chunks_for_event: list[str] = []
         try:
             while True:
                 data = self._data_queue.get_nowait()
+                chunks_for_event.append(data)
                 try:
                     self._stream.feed(data)
                 except Exception:
@@ -666,10 +720,45 @@ class AgentPane(ctk.CTkFrame):
         except Empty:
             pass
 
+        if chunks_for_event:
+            self._record_terminal_output_event("".join(chunks_for_event))
+
         if dirty:
             self._render_display()
 
         self._poll_id = self.after(50, self._poll_output)
+
+    def _record_terminal_output_event(self, text: str) -> None:
+        if not text:
+            return
+        cleaned = ANSI_RE.sub("", text)
+        cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+        cleaned = "".join(
+            ch for ch in cleaned
+            if ch == "\n" or ch == "\t" or ord(ch) >= 32
+        )
+        if not cleaned.strip():
+            return
+        if _is_terminal_repaint_noise(cleaned):
+            return
+        signature = self._terminal_output_signature(cleaned)
+        if not signature:
+            return
+        now = time.monotonic()
+        # Avoid event spam from TUI repaint loops (e.g. "you can type message").
+        if signature == self._last_output_event_signature and (now - self._last_output_event_ts) < 20.0:
+            return
+        self._last_output_event_signature = signature
+        self._last_output_event_ts = now
+        self.app._record_event(
+            self.pane_id,
+            "terminal_output",
+            {"text": cleaned},
+            agent=self.startup_command,
+        )
+
+    def _terminal_output_signature(self, text: str) -> str:
+        return _normalize_terminal_signature(text)
 
     def _history_line_to_text(self, line: object) -> str:
         if isinstance(line, dict):
@@ -832,7 +921,7 @@ class AgentPane(ctk.CTkFrame):
         menu.tk_popup(x, y)
 
     def _send_slash(self, cmd: str) -> None:
-        self._submit_terminal_input(cmd)
+        self._submit_terminal_input(cmd, source="slash_menu")
         self.app._status_note = f"{self.pane_id.upper()}: {cmd}"
         self.app.refresh_status()
 
@@ -899,6 +988,14 @@ class AgentPane(ctk.CTkFrame):
             self._on_strip_detach()
             return
 
+        self.app._record_event(
+            self.pane_id,
+            "ui_task_run_clicked",
+            {"task_id": task.id, "task_title": task.title},
+            task_id=task.id,
+            agent=self.startup_command,
+        )
+
         folder = task.folder or self._cwd or "(not set)"
         parts = [f"Working directory: {folder}"]
         parts.append(f"Task: {task.title}")
@@ -910,9 +1007,17 @@ class AgentPane(ctk.CTkFrame):
         parts.append("Begin working on this task.")
         prompt = "\n".join(parts)
 
-        self._submit_terminal_input(prompt)
+        self._submit_terminal_input(prompt, source="task_strip_run")
 
+        prev_status = task.status
         self.app._store.update_task_status(task.id, "in_progress")
+        self.app._record_event(
+            self.pane_id,
+            "task_status_changed",
+            {"task_id": task.id, "from": prev_status, "to": "in_progress", "source": "task_strip_run"},
+            task_id=task.id,
+            agent=self.startup_command,
+        )
         self._update_strip_badge("in_progress")
         self._update_strip_buttons("in_progress")
         self.app._refresh_task_board()
@@ -926,7 +1031,15 @@ class AgentPane(ctk.CTkFrame):
         if not task:
             self._on_strip_detach()
             return
+        prev_status = task.status
         self.app._store.update_task_status(self._attached_task_id, "paused")
+        self.app._record_event(
+            self.pane_id,
+            "task_status_changed",
+            {"task_id": task.id, "from": prev_status, "to": "paused", "source": "task_strip_pause"},
+            task_id=task.id,
+            agent=self.startup_command,
+        )
         self._update_strip_badge("paused")
         self._update_strip_buttons("paused")
         self.app._refresh_task_board()
@@ -940,7 +1053,15 @@ class AgentPane(ctk.CTkFrame):
         if not task:
             self._on_strip_detach()
             return
+        prev_status = task.status
         self.app._store.update_task_status(self._attached_task_id, "done")
+        self.app._record_event(
+            self.pane_id,
+            "task_status_changed",
+            {"task_id": task.id, "from": prev_status, "to": "done", "source": "task_strip_done"},
+            task_id=task.id,
+            agent=self.startup_command,
+        )
         self._update_strip_badge("done")
         self._update_strip_buttons("done")
         self.app._refresh_task_board()
@@ -952,6 +1073,13 @@ class AgentPane(ctk.CTkFrame):
         self.hide_task_strip()
         self.app._pane_task_bindings.pop(self.pane_id, None)
         self.app._store.clear_pane_binding(self.pane_id)
+        self.app._record_event(
+            self.pane_id,
+            "task_detached",
+            {"task_id": task_id, "source": "task_strip_detach"},
+            task_id=task_id or 0,
+            agent=self.startup_command,
+        )
         self.app._status_note = f"Detached task #{task_id} from {self.pane_id.upper()}"
         self.app.refresh_status()
 
@@ -992,6 +1120,13 @@ class AgentPane(ctk.CTkFrame):
             self._on_proj_strip_detach()
             return
 
+        self.app._record_event(
+            self.pane_id,
+            "ui_project_start_clicked",
+            {"project_id": project.id, "project_name": project.name},
+            agent=self.startup_command,
+        )
+
         context_path = os.path.join(project.folder, "PROJECT_CONTEXT.md")
         if not os.path.isfile(context_path):
             self.app._status_note = f"No PROJECT_CONTEXT.md in {project.folder}"
@@ -1013,7 +1148,7 @@ class AgentPane(ctk.CTkFrame):
             f"{content}\n\n"
             "Continue working on this project based on the context above."
         )
-        self._submit_terminal_input(prompt)
+        self._submit_terminal_input(prompt, source="project_strip_start")
         self.app._status_note = f"Project context sent to {self.pane_id.upper()}"
         self.app.refresh_status()
 
@@ -1025,6 +1160,13 @@ class AgentPane(ctk.CTkFrame):
             self._on_proj_strip_detach()
             return
 
+        self.app._record_event(
+            self.pane_id,
+            "ui_project_log_clicked",
+            {"project_id": project.id, "project_name": project.name},
+            agent=self.startup_command,
+        )
+
         prompt = (
             "Please summarize what you accomplished in this iteration. "
             "Format your response as:\n"
@@ -1032,7 +1174,7 @@ class AgentPane(ctk.CTkFrame):
             "Next: <what should be done next>\n\n"
             "Keep it concise (3-5 bullet points each)."
         )
-        self._submit_terminal_input(prompt)
+        self._submit_terminal_input(prompt, source="project_strip_log")
         self._proj_strip_save_btn.pack(side="left", padx=(0, 2),
                                        after=self._proj_strip_log_btn)
         self.app._status_note = f"Requested iteration log from {self.pane_id.upper()}"
@@ -1072,8 +1214,20 @@ class AgentPane(ctk.CTkFrame):
             with open(context_path, "w", encoding="utf-8") as f:
                 f.write(updated)
 
+            self.app._record_event(
+                self.pane_id,
+                "project_iteration_saved",
+                {"project_id": project.id, "path": context_path},
+                agent=self.startup_command,
+            )
             self.app._status_note = f"Iteration saved to PROJECT_CONTEXT.md"
         except Exception as exc:
+            self.app._record_event(
+                self.pane_id,
+                "project_iteration_save_failed",
+                {"project_id": project.id, "path": context_path, "error": str(exc)},
+                agent=self.startup_command,
+            )
             self.app._status_note = f"Error saving iteration: {exc}"
 
         self._proj_strip_save_btn.pack_forget()
@@ -1084,6 +1238,12 @@ class AgentPane(ctk.CTkFrame):
         self.hide_project_strip()
         self.app._pane_project_bindings.pop(self.pane_id, None)
         self.app._store.clear_pane_project_binding(self.pane_id)
+        self.app._record_event(
+            self.pane_id,
+            "project_detached",
+            {"project_id": project_id, "source": "project_strip_detach"},
+            agent=self.startup_command,
+        )
         self.app._status_note = f"Detached project #{project_id} from {self.pane_id.upper()}"
         self.app.refresh_status()
 
@@ -1171,7 +1331,7 @@ class AgentPane(ctk.CTkFrame):
 
     def _pick_slash_from_prompt(self, cmd: str) -> None:
         self.prompt_input.delete("1.0", "end")
-        self._submit_terminal_input(cmd)
+        self._submit_terminal_input(cmd, source="prompt_slash")
         self.app._status_note = f"{self.pane_id.upper()}: {cmd}"
         self.app.refresh_status()
 
@@ -1212,14 +1372,26 @@ class AgentPane(ctk.CTkFrame):
         for text in pending:
             self._submit_terminal_input_now(text)
 
-    def _submit_terminal_input(self, text: str) -> None:
+    def _submit_terminal_input(self, text: str, source: str = "terminal_input") -> None:
         stripped = text.strip()
         if not stripped:
             return
+        self.app._record_event(
+            self.pane_id,
+            "terminal_input_submitted",
+            {"text": stripped, "source": source},
+            agent=self.startup_command,
+        )
         if not self.session:
             if self._shell_command:
                 self.start(self._shell_command)
             else:
+                self.app._record_event(
+                    self.pane_id,
+                    "terminal_input_dropped",
+                    {"text": stripped, "source": source, "reason": "no_session"},
+                    agent=self.startup_command,
+                )
                 return
         if self.startup_command and not self._startup_ready:
             self._pending_terminal_submits.append(text)
@@ -1233,7 +1405,7 @@ class AgentPane(ctk.CTkFrame):
         if not text.strip():
             return
 
-        self._submit_terminal_input(text)
+        self._submit_terminal_input(text, source="prompt_input")
         self.prompt_input.delete("1.0", "end")
 
     def _run_startup_command(self) -> None:
@@ -1258,6 +1430,8 @@ class AgentPane(ctk.CTkFrame):
         self._prev_render = ""
         self._fallback_lines = []
         self._fallback_carry = ""
+        self._last_output_event_signature = ""
+        self._last_output_event_ts = 0.0
 
         self.output.config(state="normal")
         self.output.delete("1.0", "end")
@@ -1412,6 +1586,20 @@ class ChatSidebar(ctk.CTkFrame):
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             text_color=TITLE_COLOR,
         ).pack(side="left", padx=8)
+        ctk.CTkButton(
+            pane_header, text="- Remove", width=76, height=24,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            fg_color=BUTTON_BG, hover_color=BUTTON_HOVER,
+            text_color=TEXT_COLOR, corner_radius=3,
+            command=self._on_remove_pane_clicked,
+        ).pack(side="right", padx=(2, 4))
+        ctk.CTkButton(
+            pane_header, text="+ New", width=60, height=24,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            fg_color=BUTTON_BG, hover_color=BUTTON_HOVER,
+            text_color=TEXT_COLOR, corner_radius=3,
+            command=self._on_add_pane_clicked,
+        ).pack(side="right", padx=(4, 0))
 
         self._pane_scroll = ctk.CTkScrollableFrame(
             self, fg_color=PANE_BG, height=100,
@@ -1463,6 +1651,22 @@ class ChatSidebar(ctk.CTkFrame):
         self._task_scroll.pack(fill="both", expand=True, padx=4, pady=(2, 4))
 
         self._item_widgets: list[ctk.CTkFrame] = []
+
+    def _selected_pane_id(self) -> Optional[str]:
+        key = self.app._chat_selected_key or ""
+        if key.startswith("pane_"):
+            pane_id = key.split("_", 1)[1]
+            if pane_id in self.app.panes:
+                return pane_id
+        if self.app._focused_id and self.app._focused_id in self.app.panes:
+            return self.app._focused_id
+        return None
+
+    def _on_add_pane_clicked(self) -> None:
+        self.app._add_pane(source_pane_id=self._selected_pane_id())
+
+    def _on_remove_pane_clicked(self) -> None:
+        self.app._remove_pane(pane_id=self._selected_pane_id())
 
     def refresh(self) -> None:
         for w in self._item_widgets:
@@ -1649,6 +1853,604 @@ class PreviewCard(ctk.CTkFrame):
         )
         btn.pack(side="left", padx=(0, 6))
         self._action_buttons.append(btn)
+
+
+class ChatConversationPanel(ctk.CTkFrame):
+    """Chat-style surface backed by persisted events."""
+
+    def __init__(self, master: tk.Widget, app: "TriptychApp") -> None:
+        super().__init__(
+            master,
+            fg_color=PANE_BG,
+            border_color=INPUT_BORDER,
+            border_width=1,
+            corner_radius=4,
+        )
+        self.app = app
+        self._context_key: Optional[str] = None
+        self._pane_id: Optional[str] = None
+        self._task_id: Optional[int] = None
+        self._render_signature: Optional[tuple] = None
+        self._seen_choice_request_source_ids: set[int] = set()
+        self._pending_choice: Optional[dict] = None
+        self._signal_adapter = DefaultSignalAdapter()
+        self._events_cache: list = []
+        self._events_scope = "pane"
+        self._last_event_id = 0
+        self._events_context_signature: Optional[tuple] = None
+
+        header = ctk.CTkFrame(self, fg_color=TITLE_BG, height=34, corner_radius=0)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        self._title_label = ctk.CTkLabel(
+            header,
+            text="Conversation",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
+            text_color=TITLE_COLOR,
+            anchor="w",
+        )
+        self._title_label.pack(side="left", padx=(10, 6))
+
+        self._chat_mode_btn = ctk.CTkButton(
+            header,
+            text="Chat",
+            width=56,
+            height=22,
+            fg_color=SEND_BG,
+            hover_color=SEND_HOVER,
+            text_color=TITLE_COLOR,
+            corner_radius=3,
+            command=lambda: self.app._chat_set_surface_mode("chat"),
+        )
+        self._chat_mode_btn.pack(side="right", padx=(0, 6), pady=6)
+
+        self._terminal_mode_btn = ctk.CTkButton(
+            header,
+            text="Terminal",
+            width=78,
+            height=22,
+            fg_color=BUTTON_BG,
+            hover_color=BUTTON_HOVER,
+            text_color=TEXT_COLOR,
+            corner_radius=3,
+            command=lambda: self.app._chat_set_surface_mode("terminal"),
+        )
+        self._terminal_mode_btn.pack(side="right", padx=(0, 4), pady=6)
+
+        self._messages = ctk.CTkScrollableFrame(self, fg_color="#09120e")
+        self._messages.pack(fill="both", expand=True, padx=6, pady=(6, 4))
+
+        input_row = ctk.CTkFrame(self, fg_color="transparent")
+        input_row.pack(fill="x", padx=6, pady=(0, 6))
+
+        self._input = ctk.CTkTextbox(
+            input_row,
+            height=68,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=FONT_SIZE),
+            fg_color=INPUT_BG,
+            text_color=TEXT_COLOR,
+            border_color=INPUT_BORDER,
+            border_width=1,
+            corner_radius=4,
+            wrap="word",
+        )
+        self._input.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        self._input.bind("<Control-Return>", self._on_send_hotkey)
+        self._input.bind("<Control-KP_Enter>", self._on_send_hotkey)
+
+        self._send_btn = ctk.CTkButton(
+            input_row,
+            text="Send",
+            width=78,
+            height=68,
+            fg_color=SEND_BG,
+            hover_color=SEND_HOVER,
+            text_color=TITLE_COLOR,
+            corner_radius=4,
+            command=self._send_from_chat_input,
+        )
+        self._send_btn.pack(side="right")
+
+        self._input_hint = ctk.CTkLabel(
+            self,
+            text="Ctrl+Enter to send",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+            text_color="#6a9a7a",
+            anchor="w",
+        )
+        self._input_hint.pack(fill="x", padx=10, pady=(0, 6))
+
+        self._poll_id: Optional[str] = None
+        self._start_poll()
+
+    def _start_poll(self) -> None:
+        self._poll_id = self.after(800, self._poll_updates)
+
+    def _poll_updates(self) -> None:
+        self._poll_id = None
+        if self.winfo_exists() and self.app._layout_mode == "chat":
+            self.refresh_events()
+        self._start_poll()
+
+    def destroy(self) -> None:
+        if self._poll_id:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
+            self._poll_id = None
+        super().destroy()
+
+    def set_surface_mode(self, mode: str) -> None:
+        is_chat = (mode == "chat")
+        if is_chat:
+            self._chat_mode_btn.configure(fg_color=SEND_BG, text_color=TITLE_COLOR)
+            self._terminal_mode_btn.configure(fg_color=BUTTON_BG, text_color=TEXT_COLOR)
+        else:
+            self._chat_mode_btn.configure(fg_color=BUTTON_BG, text_color=TEXT_COLOR)
+            self._terminal_mode_btn.configure(fg_color=SEND_BG, text_color=TITLE_COLOR)
+
+    def set_context(self, key: Optional[str], pane_id: Optional[str], task_id: Optional[int]) -> None:
+        self._context_key = key
+        self._pane_id = pane_id
+        self._task_id = task_id
+        self._pending_choice = None
+        self._events_cache = []
+        self._events_scope = "pane"
+        self._last_event_id = 0
+        self._events_context_signature = None
+        self._render_signature = None
+        if key:
+            self._title_label.configure(text=f"Conversation: {key}")
+        else:
+            self._title_label.configure(text="Conversation")
+        self._update_input_hint()
+        self.refresh_events(force=True)
+
+    def focus_input(self) -> None:
+        self._input.focus_set()
+
+    def _update_input_hint(self) -> None:
+        if self._pending_choice:
+            opts = self._pending_choice.get("options", [])
+            nums = [str(int(item.get("number", 0))) for item in opts if int(item.get("number", 0))]
+            nums_text = "/".join(nums) if nums else "number"
+            self._input_hint.configure(
+                text=f"Action required: click a choice button or type {nums_text} and press Send",
+                text_color="#f2b84b",
+            )
+            return
+        self._input_hint.configure(text="Ctrl+Enter to send", text_color="#6a9a7a")
+
+    def refresh_events(self, force: bool = False) -> None:
+        context_signature = (self._context_key, self._pane_id, self._task_id)
+        if force or context_signature != self._events_context_signature:
+            events = self._load_context_events()
+            self._events_cache = list(events)
+            self._last_event_id = events[-1].id if events else 0
+            self._events_context_signature = context_signature
+        else:
+            delta = self._load_context_events_since(self._last_event_id)
+            if delta:
+                self._events_cache.extend(delta)
+                if len(self._events_cache) > CHAT_EVENT_LIMIT:
+                    self._events_cache = self._events_cache[-CHAT_EVENT_LIMIT:]
+                self._last_event_id = self._events_cache[-1].id if self._events_cache else 0
+        events = self._events_cache
+        last_id = events[-1].id if events else 0
+        signature = (self._context_key, self._pane_id, self._task_id, len(events), last_id)
+        if not force and signature == self._render_signature:
+            return
+        self._render_signature = signature
+
+        messages, options = self._build_messages(events)
+        self._render_messages(messages, options)
+
+    def _load_context_events(self) -> list:
+        if not self._pane_id:
+            self._events_scope = "pane"
+            return []
+        if self._task_id:
+            events = self.app._store.list_events(
+                limit=CHAT_EVENT_LIMIT,
+                pane_id=self._pane_id,
+                task_id=self._task_id,
+            )
+            if events:
+                self._events_scope = "task"
+                return events
+        self._events_scope = "pane"
+        return self.app._store.list_events(
+            limit=CHAT_EVENT_LIMIT,
+            pane_id=self._pane_id,
+        )
+
+    def _load_context_events_since(self, after_id: int) -> list:
+        if not self._pane_id or after_id <= 0:
+            return []
+        if self._events_scope == "task" and self._task_id:
+            return self.app._store.list_events_since(
+                event_id=after_id,
+                limit=CHAT_EVENT_LIMIT,
+                pane_id=self._pane_id,
+                task_id=self._task_id,
+            )
+        return self.app._store.list_events_since(
+            event_id=after_id,
+            limit=CHAT_EVENT_LIMIT,
+            pane_id=self._pane_id,
+        )
+
+    def _build_messages(self, events: list) -> tuple[list[dict], Optional[dict]]:
+        messages: list[dict] = []
+        selected_source_ids: set[int] = set()
+        detected_payloads: list[dict] = []
+        last_output_signature: Optional[str] = None
+
+        for event in events:
+            signal = self._signal_adapter.normalize(event)
+            payload = signal.payload
+            event_type = signal.event_type
+
+            if signal.kind == SIGNAL_USER_MESSAGE:
+                text = signal.text
+                if text:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "text": text,
+                            "created_at": signal.created_at,
+                            "event_id": signal.id,
+                        }
+                    )
+                continue
+
+            if signal.kind == SIGNAL_ASSISTANT_MESSAGE:
+                text = signal.text
+                if _is_terminal_repaint_noise(text):
+                    continue
+                output_sig = self._terminal_chunk_signature(text)
+                if output_sig and output_sig == last_output_signature:
+                    continue
+                last_output_signature = output_sig
+                if messages and messages[-1]["role"] == "assistant":
+                    prev_text = str(messages[-1]["text"])
+                    messages[-1]["text"] = prev_text + text
+                    messages[-1]["event_id"] = signal.id
+                else:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "text": text,
+                            "created_at": signal.created_at,
+                            "event_id": signal.id,
+                        }
+                    )
+                continue
+
+            if signal.kind == SIGNAL_CHOICE_SELECTED:
+                source_event_id = signal.source_event_id
+                if source_event_id > 0:
+                    selected_source_ids.add(source_event_id)
+
+            if signal.kind == SIGNAL_CHOICE_REQUEST:
+                source_event_id = signal.source_event_id
+                if source_event_id > 0:
+                    self._seen_choice_request_source_ids.add(source_event_id)
+                    normalized = self._normalize_choice_payload(
+                        {
+                            "source_event_id": source_event_id,
+                            "question": signal.question,
+                            "options": signal.options,
+                        }
+                    )
+                    if normalized:
+                        detected_payloads.append(normalized)
+                continue
+
+            if signal.kind == SIGNAL_SYSTEM_EVENT or signal.kind == SIGNAL_CHOICE_SELECTED:
+                system_text = self._format_system_event(event_type, payload, signal.created_at)
+            else:
+                system_text = ""
+            if system_text:
+                messages.append(
+                    {
+                        "role": "system",
+                        "text": system_text,
+                        "created_at": signal.created_at,
+                        "event_id": signal.id,
+                    }
+                )
+
+        pending_choice = self._resolve_pending_choice(
+            messages=messages,
+            selected_source_ids=selected_source_ids,
+            detected_payloads=detected_payloads,
+        )
+        return messages, pending_choice
+
+    def _terminal_chunk_signature(self, text: str) -> str:
+        return _normalize_terminal_signature(text)
+
+    def _extract_choice_payload(self, text: str) -> Optional[dict]:
+        return extract_signal_choice_payload(text)
+
+    def _normalize_choice_payload(self, payload: dict) -> Optional[dict]:
+        return normalize_signal_choice_payload(payload)
+
+    def _resolve_pending_choice(
+        self,
+        messages: list[dict],
+        selected_source_ids: set[int],
+        detected_payloads: list[dict],
+    ) -> Optional[dict]:
+        # Prefer fresh parse from the latest assistant message to keep text exact.
+        for msg in reversed(messages):
+            if msg.get("role") != "assistant":
+                continue
+            source_event_id = int(msg.get("event_id", 0) or 0)
+            if source_event_id <= 0 or source_event_id in selected_source_ids:
+                continue
+            text = str(msg.get("text", ""))
+            parsed = self._extract_choice_payload(text)
+            if not parsed:
+                continue
+            payload = {
+                "source_event_id": source_event_id,
+                "question": parsed.get("question", "Choose one option."),
+                "options": parsed.get("options", []),
+            }
+            if source_event_id not in self._seen_choice_request_source_ids:
+                self._seen_choice_request_source_ids.add(source_event_id)
+                self.app._record_event(
+                    self._pane_id or "",
+                    "assistant_choice_request_detected",
+                    payload,
+                    task_id=self._task_id,
+                    agent=self._active_agent(),
+                )
+            return payload
+
+        # Fallback to already persisted choice requests.
+        for payload in reversed(detected_payloads):
+            source_event_id = int(payload.get("source_event_id", 0) or 0)
+            if source_event_id <= 0 or source_event_id in selected_source_ids:
+                continue
+            return payload
+        return None
+
+    def _active_agent(self) -> str:
+        pane = self.app.panes.get(self._pane_id or "")
+        return pane.startup_command if pane else ""
+
+    def _format_system_event(self, event_type: str, payload: dict, created_at: str) -> str:
+        if event_type == "task_status_changed":
+            task_id = payload.get("task_id", "?")
+            from_status = payload.get("from", "")
+            to_status = payload.get("to", "")
+            return f"[{created_at}] Task #{task_id}: {from_status} -> {to_status}"
+        if event_type == "task_attached":
+            task_id = payload.get("task_id", "?")
+            return f"[{created_at}] Attached task #{task_id}"
+        if event_type == "project_attached":
+            project_name = payload.get("project_name", "")
+            return f"[{created_at}] Attached project: {project_name}"
+        if event_type == "context_injected":
+            src = payload.get("source_pane", "")
+            dst = payload.get("target_pane", "")
+            return f"[{created_at}] Injected context: {src} -> {dst}"
+        if event_type == "task_created":
+            return f"[{created_at}] Task created: {payload.get('task_title', '')}"
+        if event_type == "project_created":
+            return f"[{created_at}] Project created: {payload.get('project_name', '')}"
+        if event_type in {"pane_created", "pane_removed"}:
+            pane_id = payload.get("pane_id", "")
+            return f"[{created_at}] {event_type.replace('_', ' ').title()}: {pane_id}"
+        if event_type.startswith("ui_"):
+            short = event_type.replace("ui_", "").replace("_", " ").title()
+            return f"[{created_at}] {short}"
+        if event_type in {"project_iteration_saved", "project_iteration_save_failed"}:
+            return f"[{created_at}] {event_type.replace('_', ' ').title()}"
+        if event_type in {"task_deleted", "project_deleted"}:
+            return f"[{created_at}] {event_type.replace('_', ' ').title()}"
+        if event_type == "assistant_choice_selected":
+            number = payload.get("choice_number", "")
+            title = str(payload.get("choice_title", "")).strip()
+            if title:
+                return f"[{created_at}] Selected option {number}: {title}"
+            return f"[{created_at}] Selected option {number}"
+        return ""
+
+    def _render_messages(self, messages: list[dict], options_payload: Optional[dict]) -> None:
+        for child in self._messages.winfo_children():
+            child.destroy()
+
+        self._pending_choice = options_payload
+        self._update_input_hint()
+
+        if not messages and not options_payload:
+            ctk.CTkLabel(
+                self._messages,
+                text="No conversation events yet.",
+                text_color="#6a9a7a",
+                anchor="w",
+            ).pack(fill="x", padx=8, pady=8)
+            return
+
+        for msg in messages:
+            role = str(msg.get("role", "system"))
+            text = str(msg.get("text", "")).strip()
+            if not text:
+                continue
+            frame = ctk.CTkFrame(self._messages, fg_color="transparent")
+            frame.pack(fill="x", padx=6, pady=4)
+
+            if role == "user":
+                bubble = ctk.CTkFrame(frame, fg_color="#1a3d2a", corner_radius=6)
+                bubble.pack(anchor="e")
+                label_color = TITLE_COLOR
+            elif role == "assistant":
+                bubble = ctk.CTkFrame(frame, fg_color="#132236", corner_radius=6)
+                bubble.pack(anchor="w")
+                label_color = TEXT_COLOR
+            else:
+                bubble = ctk.CTkFrame(frame, fg_color="#2a2a17", corner_radius=6)
+                bubble.pack(anchor="center")
+                label_color = "#e8e1a0"
+
+            ctk.CTkLabel(
+                bubble,
+                text=text,
+                text_color=label_color,
+                justify="left",
+                anchor="w",
+                wraplength=700,
+                font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            ).pack(fill="x", padx=10, pady=8)
+
+        if options_payload:
+            opts = options_payload.get("options", [])
+            source_event_id = int(options_payload.get("source_event_id", 0) or 0)
+            question = str(options_payload.get("question", "Choose one option.")).strip()
+            if opts and source_event_id > 0:
+                card = ctk.CTkFrame(
+                    self._messages,
+                    fg_color="#18261a",
+                    border_color="#f2b84b",
+                    border_width=1,
+                    corner_radius=8,
+                )
+                card.pack(fill="x", padx=6, pady=(6, 10))
+
+                ctk.CTkLabel(
+                    card,
+                    text="Action required",
+                    text_color="#f2b84b",
+                    font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+                    anchor="w",
+                ).pack(fill="x", padx=10, pady=(8, 2))
+
+                ctk.CTkLabel(
+                    card,
+                    text=question,
+                    text_color=TEXT_COLOR,
+                    justify="left",
+                    anchor="w",
+                    wraplength=720,
+                    font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+                ).pack(fill="x", padx=10, pady=(0, 8))
+
+                for item in opts:
+                    number = int(item.get("number", 0))
+                    title = str(item.get("title", "")).strip()
+                    if number <= 0 or not title:
+                        continue
+                    row = ctk.CTkFrame(card, fg_color="#132015", corner_radius=6)
+                    row.pack(fill="x", padx=10, pady=(0, 6))
+
+                    badge = ctk.CTkLabel(
+                        row,
+                        text=str(number),
+                        width=28,
+                        height=22,
+                        text_color=TITLE_COLOR,
+                        fg_color=BUTTON_BG,
+                        corner_radius=3,
+                        font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
+                    )
+                    badge.pack(side="left", padx=(6, 8), pady=6)
+
+                    ctk.CTkLabel(
+                        row,
+                        text=title,
+                        text_color=TEXT_COLOR,
+                        justify="left",
+                        anchor="w",
+                        wraplength=560,
+                        font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+                    ).pack(side="left", fill="x", expand=True, padx=(0, 8), pady=6)
+
+                    option_button_text = f"{number}. {title}"
+                    ctk.CTkButton(
+                        row,
+                        text=option_button_text,
+                        width=420,
+                        height=26,
+                        fg_color=SEND_BG,
+                        hover_color=SEND_HOVER,
+                        text_color=TITLE_COLOR,
+                        corner_radius=3,
+                        command=lambda n=number, sid=source_event_id, t=title: self._select_option(
+                            n, sid, t, source="chat_choice_button"
+                        ),
+                    ).pack(side="right", padx=(0, 6), pady=6)
+
+                ctk.CTkLabel(
+                    card,
+                    text="Tip: type option number (e.g. 1/2/3) and press Send.",
+                    text_color="#b6caa5",
+                    anchor="w",
+                    font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+                ).pack(fill="x", padx=10, pady=(0, 8))
+
+    def _on_send_hotkey(self, _event: tk.Event = None) -> str:
+        self._send_from_chat_input()
+        return "break"
+
+    def _send_from_chat_input(self) -> None:
+        text = self._input.get("1.0", "end-1c").strip()
+        if not text:
+            return
+        pane = self.app.panes.get(self._pane_id or "")
+        if not pane:
+            self.app._status_note = "No active pane bound for this chat."
+            self.app.refresh_status()
+            return
+        choice_match = re.match(r"^\s*(\d{1,2})(?:\b|[\)\.\:\-])", text)
+        if self._pending_choice and choice_match:
+            number = int(choice_match.group(1))
+            source_event_id = int(self._pending_choice.get("source_event_id", 0) or 0)
+            option_title = ""
+            for item in self._pending_choice.get("options", []):
+                try:
+                    if int(item.get("number", 0) or 0) == number:
+                        option_title = str(item.get("title", "")).strip()
+                        break
+                except Exception:
+                    continue
+            if source_event_id > 0 and option_title:
+                self._input.delete("1.0", "end")
+                self._select_option(number, source_event_id, option_title, source="chat_choice_text")
+                return
+        pane._submit_terminal_input(text, source="chat_panel_input")
+        self._input.delete("1.0", "end")
+        self.app._status_note = f"Sent message to {pane.pane_id.upper()} via chat panel"
+        self.app.refresh_status()
+        self.refresh_events(force=True)
+
+    def _select_option(self, number: int, source_event_id: int, title: str, source: str) -> None:
+        pane = self.app.panes.get(self._pane_id or "")
+        if not pane:
+            self.app._status_note = "No active pane for option selection."
+            self.app.refresh_status()
+            return
+        pane._submit_terminal_input(str(number), source=source)
+        self.app._record_event(
+            pane.pane_id,
+            "assistant_choice_selected",
+            {
+                "source_event_id": source_event_id,
+                "choice_number": number,
+                "choice_title": title,
+                "input_source": source,
+            },
+            task_id=self._task_id,
+            agent=pane.startup_command,
+        )
+        self.app._status_note = f"Selected option {number} for {pane.pane_id.upper()}"
+        self.app.refresh_status()
+        self.refresh_events(force=True)
 
 
 class ChatFileExplorer(ctk.CTkFrame):
@@ -2062,6 +2864,7 @@ class TriptychApp(DnDCTk):
 
         # ── Chat mode state ──────────────────────────────────────────────
         self._layout_mode: str = "grid"
+        self._chat_surface_mode: str = "chat"
         self._chat_selected_key: Optional[str] = None
         self._chat_active_pane: Optional[AgentPane] = None
 
@@ -2276,6 +3079,11 @@ class TriptychApp(DnDCTk):
         self._chat_pane_area = ctk.CTkFrame(self._chat_body, fg_color="transparent")
         self._chat_pane_area.pack(side="left", fill="both", expand=True, padx=(0, 4))
 
+        self._chat_conversation = ChatConversationPanel(self._chat_pane_area, self)
+        self._chat_conversation.place(relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
+        self._chat_conversation.lift()
+        self._chat_conversation.set_surface_mode(self._chat_surface_mode)
+
         self._chat_explorer = ChatFileExplorer(self._chat_body, self)
         self._chat_explorer.pack(side="left", fill="y")
 
@@ -2356,6 +3164,56 @@ class TriptychApp(DnDCTk):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception:
+            pass
+
+    def _task_id_for_event(self, pane_id: str, explicit_task_id: Optional[int] = None) -> int:
+        if explicit_task_id is not None:
+            return int(explicit_task_id)
+        pane = self.panes.get(pane_id)
+        if pane and pane._attached_task_id:
+            return int(pane._attached_task_id)
+        return int(self._pane_task_bindings.get(pane_id, 0) or 0)
+
+    def _normalize_event_payload(self, payload: object) -> object:
+        if payload is None:
+            return {"_schema": "signal.v1"}
+        if isinstance(payload, dict):
+            normalized: dict[str, object] = dict(payload)
+            normalized.setdefault("_schema", "signal.v1")
+            text = normalized.get("text")
+            if isinstance(text, str) and len(text) > EVENT_TEXT_LIMIT:
+                normalized["text"] = text[-EVENT_TEXT_LIMIT:]
+                normalized["truncated"] = True
+                normalized["original_length"] = len(text)
+            return normalized
+        if isinstance(payload, (list, tuple)):
+            return list(payload)
+        return {"value": str(payload)}
+
+    def _record_event(
+        self,
+        pane_id: str,
+        event_type: str,
+        payload: object = None,
+        task_id: Optional[int] = None,
+        agent: Optional[str] = None,
+    ) -> None:
+        if not hasattr(self, "_store"):
+            return
+        pane = self.panes.get(pane_id)
+        resolved_agent = agent if agent is not None else (pane.startup_command if pane else "")
+        resolved_task_id = self._task_id_for_event(pane_id, task_id)
+        normalized_payload = self._normalize_event_payload(payload)
+        try:
+            self._store.append_event(
+                pane_id=pane_id,
+                task_id=resolved_task_id,
+                agent=resolved_agent or "",
+                event_type=event_type,
+                payload=normalized_payload,
+            )
+        except Exception:
+            # Event logging should never block UI workflows.
             pass
 
     def _normalize_agent_ids(self, value: object) -> list[str]:
@@ -2868,6 +3726,12 @@ class TriptychApp(DnDCTk):
                 status=status_var.get().strip() or "todo",
                 priority=int(priority_var.get().strip() or "2"),
             )
+            self._record_event(
+                "",
+                "task_created",
+                {"task_id": task.id, "task_title": task.title, "source": "new_task_dialog"},
+                task_id=task.id,
+            )
             self._write_task_brief(task)
             dialog.grab_release()
             dialog.destroy()
@@ -2996,6 +3860,11 @@ class TriptychApp(DnDCTk):
 
             project = self._store.create_project(
                 name=name, folder=folder, description=description,
+            )
+            self._record_event(
+                "",
+                "project_created",
+                {"project_id": project.id, "project_name": project.name, "source": "new_project_dialog"},
             )
             self._ensure_project_context_file(project, instructions)
             self._write_project_brief(project)
@@ -3448,6 +4317,9 @@ class TriptychApp(DnDCTk):
             self._chat_active_pane = None
         self._chat_preview.show_empty()
         self._chat_explorer.set_root(None, None)
+        if hasattr(self, "_chat_conversation"):
+            self._chat_conversation.set_context(None, None, None)
+            self._chat_apply_surface_mode()
         self._chat_sidebar.refresh()
         self.refresh_status()
 
@@ -3475,6 +4347,12 @@ class TriptychApp(DnDCTk):
 
         self._remove_brief_files("task", task.id)
         self._refresh_task_board()
+        self._record_event(
+            "",
+            "task_deleted",
+            {"task_id": task.id, "task_title": task.title, "detached_panes": detached},
+            task_id=task.id,
+        )
 
         if self._chat_selected_key == f"task_{task.id}":
             self._chat_selected_key = None
@@ -3513,6 +4391,11 @@ class TriptychApp(DnDCTk):
 
         self._remove_brief_files("project", project.id)
         self._refresh_task_board()
+        self._record_event(
+            "",
+            "project_deleted",
+            {"project_id": project.id, "project_name": project.name, "detached_panes": detached},
+        )
 
         if self._chat_selected_key == f"project_{project.id}":
             self._chat_selected_key = None
@@ -3697,6 +4580,13 @@ class TriptychApp(DnDCTk):
                 pane.restart_session()
 
         pane.show_task_strip(task)
+        self._record_event(
+            pane_id,
+            "task_attached",
+            {"task_id": task.id, "task_title": task.title, "source": "manager_attach"},
+            task_id=task.id,
+            agent=pane.startup_command,
+        )
         self._status_note = f"Attached task #{task_id} to {pane_id.upper()}"
         self._refresh_task_board()
 
@@ -3726,6 +4616,12 @@ class TriptychApp(DnDCTk):
                 pane.restart_session()
 
         pane.show_project_strip(project)
+        self._record_event(
+            pane_id,
+            "project_attached",
+            {"project_id": project.id, "project_name": project.name, "source": "manager_attach"},
+            agent=pane.startup_command,
+        )
         self._status_note = f"Attached project #{project_id} to {pane_id.upper()}"
         self._refresh_task_board()
 
@@ -3802,9 +4698,18 @@ class TriptychApp(DnDCTk):
         if not self.source_pane or self.source_pane not in self.panes:
             self.source_pane = pane_id
 
+        self._record_event(
+            pane_id,
+            "pane_created",
+            {"pane_id": pane_id, "agent": startup_cmd, "cwd": cwd or ""},
+            agent=startup_cmd,
+        )
         cwd_note = f" @ {cwd}" if cwd else ""
         self._status_note = f"Added {pane_id.upper()} ({startup_cmd}{cwd_note})"
         self.refresh_status()
+        if self._layout_mode == "chat" and hasattr(self, "_chat_sidebar"):
+            self._chat_sidebar.refresh()
+            self._chat_select_item(f"pane_{pane_id}")
 
     def _show_new_pane_dialog(self, initial_agent: str, initial_cwd: Optional[str]) -> None:
         dialog = ctk.CTkToplevel(self)
@@ -3945,8 +4850,17 @@ class TriptychApp(DnDCTk):
         self._pane_project_bindings.pop(target_id, None)
         self._store.clear_pane_project_binding(target_id)
         pane = self.panes.pop(target_id)
+        self._record_event(
+            target_id,
+            "pane_removed",
+            {"pane_id": target_id, "agent": pane.startup_command},
+            task_id=0,
+            agent=pane.startup_command,
+        )
         pane.stop()
         pane.destroy()
+        if getattr(self, "_chat_active_pane", None) is pane:
+            self._chat_active_pane = None
         self._reflow_panes()
 
         if self.source_pane == target_id:
@@ -3958,6 +4872,13 @@ class TriptychApp(DnDCTk):
 
         self._status_note = f"Removed {target_id.upper()}"
         self.refresh_status()
+        if self._layout_mode == "chat" and hasattr(self, "_chat_sidebar"):
+            self._chat_sidebar.refresh()
+            removed_key = f"pane_{target_id}"
+            if self._chat_selected_key == removed_key or not self._chat_selected_key:
+                self._chat_select_fallback_item()
+            else:
+                self._chat_select_item(self._chat_selected_key)
 
     def _remove_focused_pane(self) -> None:
         self._remove_pane(self._focused_id)
@@ -4054,6 +4975,18 @@ class TriptychApp(DnDCTk):
             return
 
         target.send_text(payload + "\n")
+        self._record_event(
+            target_id,
+            "context_injected",
+            {
+                "source_pane": self.source_pane,
+                "target_pane": target_id,
+                "lines": 50,
+                "text": payload,
+            },
+            task_id=self._pane_task_bindings.get(target_id, 0),
+            agent=target.startup_command,
+        )
         self._status_note = (
             f"Injected 50 lines: {self.source_pane.upper()} -> {target_id.upper()}"
         )
@@ -4069,7 +5002,7 @@ class TriptychApp(DnDCTk):
             selected = self._chat_selected_key or "none"
             chat_pane_count = len(self.panes)
             status = (
-                f"  Mode: CHAT    Selected: {selected}    "
+                f"  Mode: CHAT ({self._chat_surface_mode.upper()})    Selected: {selected}    "
                 f"Active sessions: {chat_pane_count}    "
                 f"Ctrl+Q quit    |    {self._status_note}"
             )
@@ -4111,9 +5044,48 @@ class TriptychApp(DnDCTk):
         else:
             self._switch_to_grid_mode()
 
+    def _chat_set_surface_mode(self, mode: str) -> None:
+        if mode not in {"chat", "terminal"}:
+            return
+        self._chat_surface_mode = mode
+        if hasattr(self, "_chat_conversation"):
+            self._chat_conversation.set_surface_mode(mode)
+        if self._layout_mode == "chat":
+            self._chat_apply_surface_mode()
+            self._status_note = (
+                "Chat surface active" if mode == "chat" else "Raw terminal surface active"
+            )
+            self.refresh_status()
+
+    def _chat_apply_surface_mode(self) -> None:
+        if not hasattr(self, "_chat_conversation"):
+            return
+        pane = self._chat_active_pane
+        if self._chat_surface_mode == "terminal":
+            if not pane:
+                self._chat_conversation.place(relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
+                self._chat_conversation.lift()
+                return
+            self._chat_conversation.place_forget()
+            if pane:
+                self._forget_pane_widget(pane)
+                self._chat_pane_area.update_idletasks()
+                pane.place(in_=self._chat_pane_area, relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
+                pane.lift()
+                self.after_idle(lambda p=pane: self._chat_refresh_active_pane_layout(p))
+                pane.focus_pane()
+            return
+
+        if pane:
+            self._forget_pane_widget(pane)
+        self._chat_conversation.place(relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
+        self._chat_conversation.lift()
+        self._chat_conversation.focus_input()
+
     def _switch_to_chat_mode(self) -> None:
         self._layout_mode = "chat"
         self.layout_toggle_btn.configure(text="\u2630 Grid Mode")
+        self._chat_conversation.set_surface_mode(self._chat_surface_mode)
 
         # Hide grid-mode widgets
         self.task_board.pack_forget()
@@ -4146,6 +5118,8 @@ class TriptychApp(DnDCTk):
         else:
             self._chat_preview.show_empty()
             self._chat_explorer.set_root(None, None)
+            self._chat_conversation.set_context(None, None, None)
+            self._chat_apply_surface_mode()
 
         self._status_note = "Switched to Chat mode"
         self.refresh_status()
@@ -4205,7 +5179,12 @@ class TriptychApp(DnDCTk):
         self.refresh_status()
 
     def _forget_pane_widget(self, pane: AgentPane) -> None:
-        manager = pane.winfo_manager()
+        try:
+            if not pane.winfo_exists():
+                return
+            manager = pane.winfo_manager()
+        except Exception:
+            return
         if manager == "pack":
             pane.pack_forget()
         elif manager == "grid":
@@ -4283,25 +5262,24 @@ class TriptychApp(DnDCTk):
         return self._chat_folder_for_pane(self._chat_resolve_pane_for_key(key))
 
     def _chat_show_pane_for_key(self, key: str) -> None:
-        if self._chat_active_pane:
-            self._forget_pane_widget(self._chat_active_pane)
-
+        prev_active = self._chat_active_pane
         pane = self._chat_resolve_pane_for_key(key)
-        if not pane:
-            self._chat_active_pane = None
-            return
-
-        pane._chat_borrowed = True  # type: ignore[attr-defined]
-        self._forget_pane_widget(pane)
-        self._chat_pane_area.update_idletasks()
-        pane.place(in_=self._chat_pane_area, relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
-        pane.lift()
-        self.after_idle(lambda p=pane: self._chat_refresh_active_pane_layout(p))
-        pane.focus_pane()
+        if prev_active and prev_active is not pane:
+            self._forget_pane_widget(prev_active)
         self._chat_active_pane = pane
+        task_id: Optional[int] = None
+        if key.startswith("task_"):
+            task_id = int(key.split("_", 1)[1])
+        pane_id = pane.pane_id if pane else None
+
+        if pane:
+            pane._chat_borrowed = True  # type: ignore[attr-defined]
+
+        self._chat_conversation.set_context(key, pane_id, task_id)
+        self._chat_apply_surface_mode()
 
     def _chat_refresh_active_pane_layout(self, pane: AgentPane) -> None:
-        if self._layout_mode != "chat" or self._chat_active_pane is not pane:
+        if self._layout_mode != "chat" or self._chat_surface_mode != "terminal" or self._chat_active_pane is not pane:
             return
         self._chat_pane_area.update_idletasks()
         pane.place(in_=self._chat_pane_area, relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
@@ -4319,6 +5297,13 @@ class TriptychApp(DnDCTk):
             self.refresh_status()
             return
 
+        self._record_event(
+            pane.pane_id,
+            "ui_task_run_clicked",
+            {"task_id": task.id, "task_title": task.title, "source": "chat_preview_run"},
+            task_id=task.id,
+            agent=pane.startup_command,
+        )
         self._attach_task_to_pane(pane.pane_id, task_id)
 
         folder = task.folder or pane._cwd or "(not set)"
@@ -4328,9 +5313,17 @@ class TriptychApp(DnDCTk):
         if task.dod.strip():
             parts.append(f"Definition of Done: {task.dod}")
         parts += ["", "Begin working on this task."]
-        pane._submit_terminal_input("\n".join(parts))
+        pane._submit_terminal_input("\n".join(parts), source="chat_task_run")
 
+        prev_status = task.status
         self._store.update_task_status(task.id, "in_progress")
+        self._record_event(
+            pane.pane_id,
+            "task_status_changed",
+            {"task_id": task.id, "from": prev_status, "to": "in_progress", "source": "chat_task_run"},
+            task_id=task.id,
+            agent=pane.startup_command,
+        )
         self._refresh_task_board()
         updated = self._store.get_task(task_id)
         if updated:
@@ -4340,7 +5333,22 @@ class TriptychApp(DnDCTk):
         self.refresh_status()
 
     def _chat_action_pause_task(self, task_id: int) -> None:
+        task_before = self._store.get_task(task_id)
+        pane_id = self._chat_find_bound_pane_for_task(task_id) or (self._focused_id or "")
+        pane = self.panes.get(pane_id) if pane_id else None
         self._store.update_task_status(task_id, "paused")
+        self._record_event(
+            pane_id,
+            "task_status_changed",
+            {
+                "task_id": task_id,
+                "from": task_before.status if task_before else "",
+                "to": "paused",
+                "source": "chat_task_pause",
+            },
+            task_id=task_id,
+            agent=pane.startup_command if pane else "",
+        )
         self._refresh_task_board()
         task = self._store.get_task(task_id)
         if task:
@@ -4350,7 +5358,22 @@ class TriptychApp(DnDCTk):
         self.refresh_status()
 
     def _chat_action_done_task(self, task_id: int) -> None:
+        task_before = self._store.get_task(task_id)
+        pane_id = self._chat_find_bound_pane_for_task(task_id) or (self._focused_id or "")
+        pane = self.panes.get(pane_id) if pane_id else None
         self._store.update_task_status(task_id, "done")
+        self._record_event(
+            pane_id,
+            "task_status_changed",
+            {
+                "task_id": task_id,
+                "from": task_before.status if task_before else "",
+                "to": "done",
+                "source": "chat_task_done",
+            },
+            task_id=task_id,
+            agent=pane.startup_command if pane else "",
+        )
         self._refresh_task_board()
         task = self._store.get_task(task_id)
         if task:
@@ -4374,6 +5397,12 @@ class TriptychApp(DnDCTk):
             self.refresh_status()
             return
 
+        self._record_event(
+            pane.pane_id,
+            "ui_project_start_clicked",
+            {"project_id": project.id, "project_name": project.name, "source": "chat_preview_start"},
+            agent=pane.startup_command,
+        )
         self._attach_project_to_pane(pane.pane_id, project_id)
 
         context_path = os.path.join(project.folder, "PROJECT_CONTEXT.md")
@@ -4395,7 +5424,7 @@ class TriptychApp(DnDCTk):
             f"Here is the current project context document:\n\n{content}\n\n"
             f"Continue working on this project based on the context above."
         )
-        pane._submit_terminal_input(prompt)
+        pane._submit_terminal_input(prompt, source="chat_project_start")
         self._status_note = f"Project context sent to {pane.pane_id.upper()}"
         self.refresh_status()
 
@@ -4407,6 +5436,17 @@ class TriptychApp(DnDCTk):
             self._status_note = "No active pane available."
             self.refresh_status()
             return
+        project = self._store.get_project(project_id)
+        self._record_event(
+            pane.pane_id,
+            "ui_project_log_clicked",
+            {
+                "project_id": project_id,
+                "project_name": project.name if project else "",
+                "source": "chat_preview_log",
+            },
+            agent=pane.startup_command,
+        )
         prompt = (
             "Please summarize what you accomplished in this iteration. "
             "Format your response as:\n"
@@ -4414,7 +5454,7 @@ class TriptychApp(DnDCTk):
             "Next: <what should be done next>\n\n"
             "Keep it concise (3-5 bullet points each)."
         )
-        pane._submit_terminal_input(prompt)
+        pane._submit_terminal_input(prompt, source="chat_project_log")
         self._status_note = f"Requested iteration log from {pane.pane_id.upper()}"
         self.refresh_status()
 
