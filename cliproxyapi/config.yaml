@@ -1,0 +1,9 @@
+﻿host: "127.0.0.1"
+port: 8317
+
+auth-dir: "~/.cli-proxy-api"
+
+api-keys:
+  - "agent-commander-local"
+
+debug: false

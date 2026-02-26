@@ -1,17 +1,40 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
-
-main_cache/
-
-build/
+.Python
+*.egg-info/
+.eggs/
+*.egg
 dist/
-*.spec
+dist_new/
+build/pyinstaller_work/
+*.spec.bak
 
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
 .DS_Store
 Thumbs.db
-ORCHESTRATOR_PLAN.md
+
+# Claude Code
 .claude/
-nul
+
+# Logs
+*.log
+logs/
+
+# Test cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

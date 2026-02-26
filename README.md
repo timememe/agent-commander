@@ -1,99 +1,126 @@
-![Agent Commander](logo_name_w.png)
-
 # Agent Commander
 
-Agent Commander is a desktop GUI for managing multiple AI coding agents (Codex, Claude Code, Gemini CLI) in one place: agent panes, tasks, projects, chat mode, file explorer, and iteration workflows.
+**Desktop AI agent workspace — Claude, Gemini, and Codex in one GUI.**
 
-This repository is currently focused on the first public version for testing and feedback.
+Agent Commander is a desktop application that wraps CLI-based AI agents (Claude Code, Gemini CLI, OpenAI Codex) in a rich interface with multi-session management, scheduled automation, skill injection, and extension support.
 
-## v1 Features
+![Agent Commander](agent_commander_logo.png)
 
-- Chat Mode by default (main user flow).
-- Grid Mode for side-by-side multi-agent monitoring.
-- Agent panes with terminal, agent selector, and working folder picker.
-- Task and project manager (create, edit, delete, starter templates).
-- Task/project to pane binding.
-- Project context flow via `PROJECT_CONTEXT.md`.
-- Chat Mode file explorer (including basic drag and drop).
-- Setup Wizard and preflight checks for available agent CLIs.
+---
 
-## Screenshots
+## Features
 
-### Chat Mode
+### Multi-Agent, Multi-Session
+- Run **Claude**, **Gemini**, and **Codex** simultaneously in separate sessions
+- Switch agents per session without restarting
+- Two transport modes: **PTY** (direct CLI subprocess) and **ProxyAPI** (OpenAI-compatible HTTP streaming)
 
-![Chat Mode](chat_mode.png)
+### Session Modes
+| Mode | Description |
+|------|-------------|
+| 💬 **Chat** | Standard interactive conversation |
+| ↺ **Loop** | Agent auto-continues until it outputs `[TASK_COMPLETE]` |
+| ◷ **Schedule** | Agent runs automatically on a cron schedule |
 
-### Grid Mode
+### Skill Library
+Create reusable context blocks that are injected into agent sessions before the first message. Perfect for personas, coding standards, domain knowledge, or any system-level instructions.
 
-![Grid Mode](grid_mode.png)
+### Schedule Agent
+Configure agents to run on any schedule — every 15 minutes, daily at a specific time, weekly on selected days, or a custom interval. Stop, restart, and edit schedules inline without creating a new session.
 
-## System Requirements
+### Extensions
+Connect external services to give agents real capabilities:
+- **Yandex Mail / Gmail** — agents can list, read, and send emails via IMAP/SMTP tool calling
 
-- OS: Windows 10/11 (primary target for current version).
-- Python: **3.10+** (Python 3.12 recommended).
-- Internet access: required on first launch to install Python dependencies.
-- Agent access:
-  - Codex: requires an OpenAI account.
-  - Gemini CLI: requires a Google account with Gemini access.
-  - Claude Code: requires a paid Anthropic subscription.
+### Projects
+Group sessions under projects with a shared architecture document. Agents can reference the project context to maintain consistency across conversations.
 
-## Quick Start
+### File Tray & Drag-and-Drop
+A built-in file browser on the right side lets you drag files directly into the chat input.
 
-1. Install Python 3.10+ and ensure `py` or `python` is available in PATH.
-2. Clone or download this repository.
-3. Run `run_agent_commander.bat` (double click).
+---
 
-The launcher will:
-- create a local `.venv` if missing,
-- install dependencies from `requirements.txt` on first run (or when requirements change),
-- run preflight checks,
-- start the app.
+## Installation
 
-Setup only (without starting GUI):
+### Windows (recommended)
 
+1. Download the latest release from [Releases](https://github.com/timememe/agent-commander/releases)
+2. Extract and run `AgentCommander.exe`
+
+Or run the setup script:
 ```bat
-run_agent_commander.bat --setup-only
+bootstrap_windows.bat
 ```
 
-## How to Use
+### From source
 
-### 1. Create an Agent Pane
+**Requirements:** Python 3.11+, one or more CLI agents installed (`claude`, `gemini`, `codex`)
 
-1. Click `+ Add Agent` in the top menu.
-2. In the new pane, choose an agent in the dropdown (`claude` / `gemini` / `codex`).
-3. Optionally set a working folder using `Folder`.
+```bash
+git clone https://github.com/timememe/agent-commander.git
+cd agent-commander
+python -m venv .venv
+.venv\Scripts\activate       # Windows
+pip install -e .
+agent-commander gui
+```
 
-### 2. Create a Task
+---
 
-1. In Manager, click `New Task`.
-2. Fill in `Title` and optionally `Folder`, `Goal`, `Status`, `Priority`.
-3. Click `Create`.
-4. In Chat Mode, open the task from `Tasks` and use:
-- `Run` to send task context to the agent,
-- `Pause` / `Done` to update status,
-- `Edit` / `Delete` to modify or remove the task.
+## Configuration
 
-### 3. Create a Project
+Config file is created automatically at `~/.agent-commander/config.json` on first run.
 
-1. In Manager, click `New Project`.
-2. Fill in `Name`, `Folder`, `Description`, and project instructions for `PROJECT_CONTEXT.md`.
-3. Click `Create`.
-4. In Chat Mode, open the project from `Projects` and use:
-- `Start` to enter the project flow and initialize agent context,
-- `Run` to request/continue an iteration prompt,
-- `Edit` / `Delete` to modify or remove the project.
+To use **ProxyAPI mode** (recommended for Claude), point it at a running [CLIProxyAPI](https://github.com/timememe/CLIProxyAPI) instance:
 
-### 4. UI Modes
+```json
+{
+  "proxy_api": {
+    "enabled": true,
+    "base_url": "http://localhost:8080",
+    "model_claude": "claude-opus-4-6"
+  }
+}
+```
 
-- `Chat Mode` (default): sidebar + preview card + active pane + explorer.
-- `Grid Mode`: all panes visible side by side.
+The included `cliproxyapi/cli-proxy-api.exe` can be started from the Settings panel inside the app.
 
-## Data and Notes
+---
 
-- Manager data is stored in `main_cache/orchestrator.db`.
-- Starter templates may be loaded automatically on first empty launch.
-- The launcher installs dependencies automatically, but Python itself must already be installed.
+## Project Structure
 
-## Feedback
+```
+agent_commander/
+├── cli/            # Entry point (typer commands)
+├── gui/            # All UI components (customtkinter)
+│   ├── app.py      # Main TriptychApp window
+│   ├── chat_panel.py
+│   ├── sidebar.py
+│   ├── input_bar.py
+│   ├── settings_dialog.py
+│   ├── team_dialog.py   # Skill Library panel
+│   └── ...
+├── agent/          # AgentLoop — message dispatch and loop logic
+├── providers/      # PTY backend, ProxyAPI client, tool definitions
+├── session/        # Persistent stores (sessions, skills, projects, extensions)
+├── cron/           # CronService — schedule execution
+└── bus/            # Internal message bus
+```
 
-Issues and UX feedback are welcome as we prepare for wider open-source testing.
+---
+
+## Building
+
+Requires [Inno Setup](https://jrsoftware.org/isdl.php) for the installer (optional).
+
+```bat
+build\build.bat
+```
+
+Output: `dist\AgentCommander\AgentCommander.exe`
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE)

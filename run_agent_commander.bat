@@ -1,30 +1,49 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 
 cd /d "%~dp0"
-set "APP_FILE=app_gui.py"
-set "PREFLIGHT_FILE=launcher_preflight.py"
-set "REQ_FILE=requirements.txt"
+
 set "VENV_DIR=.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "VENV_PYW=%VENV_DIR%\Scripts\pythonw.exe"
 set "STAMP_FILE=%VENV_DIR%\.deps_installed"
-set "STAMP_REQ_FILE=%VENV_DIR%\.requirements.lock"
+set "STAMP_LOCK_FILE=%VENV_DIR%\.pyproject.lock"
+set "PROJECT_FILE=pyproject.toml"
 set "SETUP_ONLY=0"
+set "USE_CONSOLE=0"
+set "FORWARD_ARGS="
 
+:parse_args
+if "%~1"=="" goto args_done
 if /I "%~1"=="--setup-only" (
     set "SETUP_ONLY=1"
+    shift
+    goto parse_args
 )
+if /I "%~1"=="--console" (
+    set "USE_CONSOLE=1"
+    shift
+    goto parse_args
+)
+set "FORWARD_ARGS=%FORWARD_ARGS% %~1"
+shift
+goto parse_args
 
-if not exist "%APP_FILE%" (
-    echo [ERROR] %APP_FILE% not found in:
+:args_done
+
+if not exist "agent_commander\__main__.py" (
+    echo [ERROR] agent_commander project files not found in:
     echo %CD%
     pause
     exit /b 1
 )
 
-call :resolve_python_bootstrap
-if errorlevel 1 (
+set "PY_BOOTSTRAP="
+where py >nul 2>&1 && set "PY_BOOTSTRAP=py -3"
+if not defined PY_BOOTSTRAP (
+    where python >nul 2>&1 && set "PY_BOOTSTRAP=python"
+)
+if not defined PY_BOOTSTRAP (
     echo [ERROR] Python 3.10+ was not found.
     echo Install Python and re-run this launcher.
     echo https://www.python.org/downloads/windows/
@@ -50,13 +69,18 @@ if not exist "%VENV_PY%" (
 
 set "NEED_INSTALL=0"
 if not exist "%STAMP_FILE%" set "NEED_INSTALL=1"
-if exist "%REQ_FILE%" (
-    if not exist "%STAMP_REQ_FILE%" (
+if exist "%PROJECT_FILE%" (
+    if not exist "%STAMP_LOCK_FILE%" (
         set "NEED_INSTALL=1"
     ) else (
-        fc /b "%REQ_FILE%" "%STAMP_REQ_FILE%" >nul 2>&1
+        fc /b "%PROJECT_FILE%" "%STAMP_LOCK_FILE%" >nul 2>&1
         if errorlevel 1 set "NEED_INSTALL=1"
     )
+)
+
+if "%NEED_INSTALL%"=="0" (
+    "%VENV_PY%" -c "import importlib.util; mods=('typer','pydantic','customtkinter','pyte','winpty','plyer'); raise SystemExit(0 if all(importlib.util.find_spec(m) for m in mods) else 1)" >nul 2>&1
+    if errorlevel 1 set "NEED_INSTALL=1"
 )
 
 if "%NEED_INSTALL%"=="1" (
@@ -68,23 +92,39 @@ if "%NEED_INSTALL%"=="1" (
         exit /b 1
     )
 
-    if exist "%REQ_FILE%" (
-        "%VENV_PY%" -m pip install -r "%REQ_FILE%"
+    "%VENV_PY%" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+    if errorlevel 1 (
+        echo [WARN] Python is below 3.11. Installing runtime dependencies without editable package.
+        "%VENV_PY%" -m pip install ^
+            "typer>=0.9.0" ^
+            "pydantic>=2.0.0" ^
+            "pydantic-settings>=2.0.0" ^
+            "loguru>=0.7.0" ^
+            "rich>=13.0.0" ^
+            "croniter>=2.0.0" ^
+            "prompt-toolkit>=3.0.0" ^
+            "customtkinter>=5.2.0" ^
+            "pyte>=0.8.2" ^
+            "tkinterdnd2>=0.4.3" ^
+            "plyer>=2.1.0" ^
+            "win10toast>=0.9" ^
+            "pywinpty>=2.0.13"
         if errorlevel 1 (
-            echo [ERROR] Failed to install dependencies from %REQ_FILE%.
+            echo [ERROR] Failed to install runtime dependencies.
             pause
             exit /b 1
         )
     ) else (
-        echo [WARN] %REQ_FILE% not found. Skipping dependency installation.
+        "%VENV_PY%" -m pip install -e .
+        if errorlevel 1 (
+            echo [ERROR] Failed to install project dependencies.
+            pause
+            exit /b 1
+        )
     )
 
     >"%STAMP_FILE%" echo %DATE% %TIME%
-    if exist "%REQ_FILE%" copy /Y "%REQ_FILE%" "%STAMP_REQ_FILE%" >nul
-)
-
-if exist "%PREFLIGHT_FILE%" (
-    "%VENV_PY%" "%PREFLIGHT_FILE%" >nul 2>&1
+    if exist "%PROJECT_FILE%" copy /Y "%PROJECT_FILE%" "%STAMP_LOCK_FILE%" >nul
 )
 
 if "%SETUP_ONLY%"=="1" (
@@ -92,25 +132,26 @@ if "%SETUP_ONLY%"=="1" (
     exit /b 0
 )
 
-if exist "%VENV_PYW%" (
-    "%VENV_PYW%" "%APP_FILE%"
+set "CONFIG_FILE=%USERPROFILE%\.agent_commander\config.json"
+if not exist "%CONFIG_FILE%" (
+    echo [SETUP] No config found, running initial onboarding...
+    "%VENV_PY%" -m agent-commander onboard
+    if errorlevel 1 (
+        echo [ERROR] Onboarding failed.
+        pause
+        exit /b 1
+    )
+)
+
+if "%USE_CONSOLE%"=="1" (
+    "%VENV_PY%" -m agent-commander gui %FORWARD_ARGS%
     exit /b %errorlevel%
 )
 
-"%VENV_PY%" "%APP_FILE%"
+if exist "%VENV_PYW%" (
+    "%VENV_PYW%" -m agent-commander gui %FORWARD_ARGS%
+    exit /b %errorlevel%
+)
+
+"%VENV_PY%" -m agent-commander gui %FORWARD_ARGS%
 exit /b %errorlevel%
-
-:resolve_python_bootstrap
-where py >nul 2>&1
-if %errorlevel%==0 (
-    set "PY_BOOTSTRAP=py -3"
-    exit /b 0
-)
-
-where python >nul 2>&1
-if %errorlevel%==0 (
-    set "PY_BOOTSTRAP=python"
-    exit /b 0
-)
-
-exit /b 1

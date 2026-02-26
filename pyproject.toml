@@ -1,0 +1,78 @@
+[project]
+name = "agent-commander-gui"
+version = "1.0.0"
+description = "Desktop AI agent workspace — Claude, Gemini, Codex in one GUI"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Agent Commander contributors"}
+]
+keywords = ["ai", "agent", "desktop", "gui", "claude", "gemini", "codex"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "typer>=0.9.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "loguru>=0.7.0",
+    "rich>=13.0.0",
+    "croniter>=2.0.0",
+    "prompt-toolkit>=3.0.0",
+    "customtkinter>=5.2.0",
+    "pyte>=0.8.2",
+    "tkinterdnd2>=0.4.3",
+    "plyer>=2.1.0",
+    "win10toast>=0.9; platform_system == 'Windows'",
+    "pexpect>=4.9.0; platform_system != 'Windows'",
+    "pywinpty>=2.0.13; platform_system == 'Windows'",
+    "python-docx>=1.0.0",
+    "openpyxl>=3.1.0",
+    "python-pptx>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+agent-commander = "agent_commander.cli.commands:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_commander"]
+
+[tool.hatch.build.targets.wheel.sources]
+"agent_commander" = "agent_commander"
+
+[tool.hatch.build]
+include = [
+    "agent_commander/**/*.py",
+    "agent_commander/skills/**/*.md",
+    "agent_commander/skills/**/*.sh",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "agent_commander/",
+    "LICENSE",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
