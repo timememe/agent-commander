@@ -168,7 +168,7 @@ class ProxyAPIProvider:
         event_q: _EventQueue,
     ) -> None:
         """Multi-round agent loop: send request, execute tool calls, repeat."""
-        from agent_commander.providers.tools import TOOL_DEFINITIONS, execute_tool
+        from agent_commander.providers.tools.definitions import TOOL_DEFINITIONS, execute_tool
 
         model = self._select_model(session)
         messages: list[dict] = [{"role": "user", "content": message}]

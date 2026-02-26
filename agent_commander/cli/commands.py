@@ -137,7 +137,7 @@ def _resolve_workdir(raw: str, workspace: Path) -> str:
 
 
 def _apply_agent_overrides(config: "Config", workspace: Path) -> dict[str, str]:
-    from agent_commander.providers.agent_registry import AGENT_DEFS
+    from agent_commander.providers.runtime.registry import AGENT_DEFS
 
     workdirs: dict[str, str] = {}
     for key, agent_def in AGENT_DEFS.items():
@@ -155,7 +155,7 @@ def _apply_agent_overrides(config: "Config", workspace: Path) -> dict[str, str]:
 
 
 def _enabled_agents(config: "Config") -> list[str]:
-    from agent_commander.providers.agent_registry import AGENT_DEFS
+    from agent_commander.providers.runtime.registry import AGENT_DEFS
 
     enabled: list[str] = []
     for key in AGENT_DEFS:
@@ -167,7 +167,7 @@ def _enabled_agents(config: "Config") -> list[str]:
 
 def _detect_available_agents() -> dict[str, str]:
     """Detect installed CLI agents from PATH."""
-    from agent_commander.providers.agent_registry import AGENT_DEFS
+    from agent_commander.providers.runtime.registry import AGENT_DEFS
 
     detected: dict[str, str] = {}
     for key, agent_def in AGENT_DEFS.items():
@@ -243,7 +243,7 @@ def _project_root() -> Path:
 def _build_proxy_server_manager(config: "Config"):
     if not config.proxy_api.enabled:
         return None
-    from agent_commander.providers.proxy_server import ProxyServerManager
+    from agent_commander.providers.transport.proxy_server import ProxyServerManager
 
     return ProxyServerManager(
         binary_path=config.proxy_api.binary_path,
@@ -264,9 +264,9 @@ def gui(
     from agent_commander.config.loader import load_config, save_config
     from agent_commander.gui import theme as gui_theme
     from agent_commander.gui.channel import GUIChannel
-    from agent_commander.providers.agent_registry import AGENT_DEFS
-    from agent_commander.providers.base import CLIAgentProvider
-    from agent_commander.providers.proxy_api import ProxyAPIProvider
+    from agent_commander.providers.runtime.registry import AGENT_DEFS
+    from agent_commander.providers.provider import CLIAgentProvider
+    from agent_commander.providers.transport.proxy_session import ProxyAPIProvider
     from agent_commander.session.gui_store import GUIStore
     from agent_commander.session.extension_store import ExtensionStore
     from agent_commander.session.skill_store import SkillStore, seed_starter_skills
@@ -466,7 +466,7 @@ def gateway() -> None:
 def status() -> None:
     """Show agent-commander-gui status."""
     from agent_commander.config.loader import get_config_path, load_config
-    from agent_commander.providers.agent_registry import AGENT_DEFS
+    from agent_commander.providers.runtime.registry import AGENT_DEFS
 
     config_path = get_config_path()
     config = load_config()
@@ -521,9 +521,9 @@ def heartbeat(
     from agent_commander.bus.queue import MessageBus
     from agent_commander.config.loader import load_config
     from agent_commander.heartbeat.service import HEARTBEAT_OK_TOKEN, HEARTBEAT_PROMPT, HeartbeatService
-    from agent_commander.providers.agent_registry import AGENT_DEFS
-    from agent_commander.providers.base import CLIAgentProvider
-    from agent_commander.providers.proxy_api import ProxyAPIProvider
+    from agent_commander.providers.runtime.registry import AGENT_DEFS
+    from agent_commander.providers.provider import CLIAgentProvider
+    from agent_commander.providers.transport.proxy_session import ProxyAPIProvider
 
     config = load_config()
     if _run_setup_wizard(config, interactive=False):

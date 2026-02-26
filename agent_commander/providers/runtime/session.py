@@ -17,9 +17,9 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 
 from loguru import logger
 
-from agent_commander.providers.agent_registry import AgentDef, get_agent_def
-from agent_commander.providers.marker_parser import TerminalState, extract_response, get_terminal_state
-from agent_commander.providers.pty_backend import PTYBackend, build_backend
+from .registry import AgentDef, get_agent_def
+from .markers import TerminalState, extract_response, get_terminal_state
+from .backend import PTYBackend, build_backend
 
 ANSI_RE = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
 # Extended: also catch OSC sequences (\x1b]...\x07 or \x1b]...\x1b\\)

@@ -11,10 +11,10 @@ from loguru import logger
 from agent_commander.agent.context import ContextBuilder
 from agent_commander.bus.events import InboundMessage, OutboundMessage
 from agent_commander.bus.queue import MessageBus
-from agent_commander.providers.agent_session import AgentSession
-from agent_commander.providers.base import CLIAgentProvider
-from agent_commander.providers.proxy_api import ProxySession
-from agent_commander.providers.signal_filter import filter_noise_lines
+from agent_commander.providers.runtime.session import AgentSession
+from agent_commander.providers.provider import CLIAgentProvider
+from agent_commander.providers.transport.proxy_session import ProxySession
+from agent_commander.providers.runtime.filter import filter_noise_lines
 from agent_commander.session.manager import SessionManager
 
 StreamCallback = Callable[[InboundMessage, str, bool], Awaitable[None]]

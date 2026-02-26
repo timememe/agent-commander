@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from agent_commander.providers.email_tools import EMAIL_TOOL_DEFINITIONS, execute_email_tool
+from .email import EMAIL_TOOL_DEFINITIONS, execute_email_tool
 
 if TYPE_CHECKING:
     from agent_commander.session.extension_store import ExtensionStore

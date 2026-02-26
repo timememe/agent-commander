@@ -18,7 +18,7 @@ def test_agent(agent_key: str, command: str) -> None:
     print(f"  [OK] Command found: {resolved}")
 
     # 2. Try PTY backend
-    from agent_commander.providers.pty_backend import build_backend
+    from agent_commander.providers.runtime.backend import build_backend
     try:
         backend = build_backend(command=command, cols=120, rows=40)
         print(f"  [OK] PTY backend created: {type(backend).__name__}")
@@ -65,7 +65,7 @@ def test_agent(agent_key: str, command: str) -> None:
         print(f"  [WARN] pyte not installed, skipping render test")
 
     # 5. Test ANSI stripping
-    from agent_commander.providers.agent_session import ANSI_FULL_RE
+    from agent_commander.providers.runtime.session import ANSI_FULL_RE
     raw_text = "".join(chunks)
     clean = ANSI_FULL_RE.sub("", raw_text)
     clean = clean.replace("\r\n", "\n").replace("\r", "\n")
@@ -76,7 +76,7 @@ def test_agent(agent_key: str, command: str) -> None:
             print(f"    | {line}")
 
     # 6. Test prompt detection
-    from agent_commander.providers.agent_registry import get_agent_def
+    from agent_commander.providers.runtime.registry import get_agent_def
     import re
     agent_def = get_agent_def(agent_key)
     prompt_regexes = [re.compile(p, re.MULTILINE) for p in agent_def.prompt_patterns]
@@ -88,7 +88,7 @@ def test_agent(agent_key: str, command: str) -> None:
         print(f"    | {repr(line)}")
 
     # 7. Test marker extraction
-    from agent_commander.providers.marker_parser import MarkerExtractor
+    from agent_commander.providers.runtime.markers import MarkerExtractor
     extractor = MarkerExtractor(agent_key)
     extracted = extractor.feed(clean)
     flushed = extractor.flush()
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     }
 
     # Override from env if set
-    from agent_commander.providers.agent_registry import AGENT_DEFS
+    from agent_commander.providers.runtime.registry import AGENT_DEFS
     for key, agent_def in AGENT_DEFS.items():
         cmd = agent_def.resolve_command()
         agents[key] = cmd
