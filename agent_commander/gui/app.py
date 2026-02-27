@@ -8,7 +8,10 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from agent_commander.usage.models import AgentUsageSnapshot
 
 import customtkinter as ctk
 from loguru import logger
@@ -340,6 +343,64 @@ class TriptychApp:
 
     def set_status(self, text: str) -> None:
         self._run_on_ui(lambda: self._set_status_ui(text))
+
+    def set_usage_placeholder(self, text: str) -> None:
+        """Show a placeholder text in the usage area (e.g. 'Codex: checking limits…')."""
+        self._run_on_ui(
+            lambda: self._status_bar.set_usage(text) if self._status_bar else None
+        )
+
+    def update_usage(self, agent: str, snapshot: "AgentUsageSnapshot") -> None:
+        """Thread-safe update of the right-side usage display in the status bar.
+
+        Each agent reports its own snapshot; all are combined into one line.
+        """
+        self._run_on_ui(lambda: self._store_and_render_usage(agent, snapshot))
+
+    def _store_and_render_usage(self, agent: str, snapshot: "AgentUsageSnapshot") -> None:
+        if not hasattr(self, "_usage_snapshots"):
+            self._usage_snapshots: dict[str, "AgentUsageSnapshot"] = {}
+        self._usage_snapshots[agent] = snapshot
+        self._update_usage_ui()
+
+    def _update_usage_ui(self) -> None:
+        if self._status_bar is None:
+            return
+        snapshots: dict[str, "AgentUsageSnapshot"] = getattr(
+            self, "_usage_snapshots", {}
+        )
+        if not snapshots:
+            return
+
+        agent_parts: list[str] = []
+        # Track the worst remaining % across quota windows to pick status colour.
+        min_remaining: float | None = None
+
+        for agent, snap in snapshots.items():
+            if snap.error or not snap.windows:
+                continue
+            quota_windows = [w for w in snap.windows if w.has_quota]
+            # For agents with many model windows (e.g. Gemini), show only the
+            # most-constrained window to keep the status bar concise.
+            display_windows = snap.windows if len(quota_windows) <= 2 else [snap.primary]
+            window_parts: list[str] = []
+            for w in (display_windows or snap.windows[:1]):
+                if w is None:
+                    continue
+                window_parts.append(w.format_status())
+                if w.has_quota:
+                    r = w.remaining_percent
+                    if min_remaining is None or r < min_remaining:
+                        min_remaining = r
+            if window_parts:
+                label = "  ·  ".join(window_parts)
+                agent_parts.append(f"{agent.capitalize()}: {label}")
+
+        if not agent_parts:
+            return
+
+        text = "    ·    ".join(agent_parts)
+        self._status_bar.set_usage(text, remaining_percent=min_remaining)
 
     def receive_tool_chunk(self, session_id: str, chunk: str, final: bool = False) -> None:
         """Called from asyncio thread — routes tool call log to UI thread."""

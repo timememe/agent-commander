@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from agent_commander.cron.service import CronService
     from agent_commander.cron.types import CronJob
     from agent_commander.session.project_store import ProjectStore
+    from agent_commander.usage.monitor import UsageMonitor
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class GUIChannel:
         cron_service: "CronService | None" = None,
         project_store: "ProjectStore | None" = None,
         extension_store: ExtensionStore | None = None,
+        usage_monitors: "list[UsageMonitor] | None" = None,
     ) -> None:
         self.bus = bus
         self.default_cwd = default_cwd
@@ -66,6 +68,7 @@ class GUIChannel:
         self.cron_service = cron_service
         self.project_store = project_store
         self.extension_store = extension_store
+        self.usage_monitors: list[UsageMonitor] = usage_monitors or []
 
         self._app: TriptychApp | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -295,6 +298,27 @@ class GUIChannel:
             project_store=self.project_store,
             extension_store=self.extension_store,
         )
+
+        # Wire each usage monitor → app now that the app object exists.
+        if self.usage_monitors:
+            app_ref = self._app
+
+            # Show placeholder for each monitored agent immediately.
+            names = " · ".join(
+                f"{m.agent.capitalize()}: checking…" for m in self.usage_monitors
+            )
+            app_ref.set_usage_placeholder(names)
+
+            for _monitor in self.usage_monitors:
+                _agent = _monitor.agent  # capture in closure
+
+                def _make_cb(agent: str):
+                    def _on_usage_update(snapshot: object) -> None:
+                        app_ref.update_usage(agent, snapshot)  # type: ignore[arg-type]
+                    return _on_usage_update
+
+                _monitor.on_update = _make_cb(_agent)
+
         try:
             self._app.run()
         finally:

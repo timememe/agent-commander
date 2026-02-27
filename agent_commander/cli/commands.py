@@ -331,6 +331,7 @@ def gui(
 
     from agent_commander.cron.service import CronService
     from agent_commander.session.project_store import ProjectStore
+    from agent_commander.usage.monitor import UsageMonitor
 
     session_store = GUIStore()
     skill_store = SkillStore()
@@ -340,6 +341,25 @@ def gui(
 
     cron_store_path = Path.home() / ".agent-commander" / "cron.json"
     cron_service = CronService(store_path=cron_store_path)
+
+    # Build one UsageMonitor per installed agent that supports probing.
+    # codex  → quota % from TUI status bar
+    # claude → plan/model info from startup splash (label only)
+    # gemini → plan info from startup banner (label only)
+    from agent_commander.gui.notifications import send_notification
+
+    _probed_agents = {"codex", "claude", "gemini"}
+    usage_monitors: list[UsageMonitor] = []
+    for _agent_key in _probed_agents:
+        _adef = AGENT_DEFS.get(_agent_key)
+        if _adef is None:
+            continue
+        _cmd = _adef.resolve_command()
+        if not shutil.which(_cmd.split()[0]):
+            continue
+        _mon = UsageMonitor(agent=_agent_key, command=_cmd, interval_s=60.0)
+        _mon.on_notify = send_notification
+        usage_monitors.append(_mon)
 
     bus = MessageBus()
     gui_channel = GUIChannel(
@@ -357,6 +377,7 @@ def gui(
         cron_service=cron_service,
         project_store=project_store,
         extension_store=extension_store,
+        usage_monitors=usage_monitors,
     )
     if config.proxy_api.enabled:
         cli_provider = ProxyAPIProvider(
@@ -414,12 +435,17 @@ def gui(
             logger.info(f"Startup: purged {purged} orphan cron job(s)")
 
         await cron_service.start()
+        for _mon in usage_monitors:
+            await _mon.start()
+
         dispatch_task = asyncio.create_task(bus.dispatch_outbound())
         loop_task = asyncio.create_task(agent_loop.run())
         gui_task = asyncio.create_task(gui_channel.start())
         try:
             await gui_task
         finally:
+            for _mon in usage_monitors:
+                _mon.stop()
             await gui_channel.stop()
             cron_service.stop()
             agent_loop.stop()
