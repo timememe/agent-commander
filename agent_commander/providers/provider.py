@@ -36,6 +36,8 @@ class CLIAgentProvider:
         message: str,
         session: "AgentSession",
         on_raw: Callable[[str], Awaitable[None]] | None = None,
+        on_tool_start: Callable[[dict], Awaitable[None]] | None = None,
+        on_tool_end: Callable[[dict], Awaitable[None]] | None = None,
     ) -> AsyncIterator[str]:
         """
         Send one message to CLI agent and yield response when complete.
@@ -43,6 +45,7 @@ class CLIAgentProvider:
         Raw PTY output is streamed to on_raw callback in real time (terminal panel).
         The clean response is extracted from a terminal snapshot after completion.
         """
+        del on_tool_start, on_tool_end  # PTY mode does not emit structured tool events.
         logger.debug(f"[send_and_receive] agent={session.agent.key}, msg_len={len(message)}")
 
         # Gemini fallback: run in non-interactive mode per-turn.

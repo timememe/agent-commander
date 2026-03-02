@@ -34,6 +34,9 @@ Thumbs.db
 *.log
 logs/
 
+# Local planning docs
+REFACTOR_PLAN.md
+
 # Test cache
 .pytest_cache/
 .mypy_cache/

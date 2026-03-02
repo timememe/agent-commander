@@ -38,6 +38,7 @@ class ChatPanel(ctk.CTkFrame):
 
         self._bubbles: list[ChatBubble] = []
         self._streaming_bubble: ChatBubble | None = None
+        self._tool_bubble: ChatBubble | None = None
         self._search_query = ""
         self._search_hits: list[tuple[ChatBubble, int]] = []
         self._search_index = -1
@@ -132,6 +133,7 @@ class ChatPanel(ctk.CTkFrame):
             bubble.destroy()
         self._bubbles.clear()
         self._streaming_bubble = None
+        self._tool_bubble = None
         self._search_query = ""
         self._search_hits = []
         self._search_index = -1
@@ -145,6 +147,8 @@ class ChatPanel(ctk.CTkFrame):
             self.add_message(message.role, message.text)
 
     def add_message(self, role: str, text: str) -> ChatBubble:
+        if role == "user":
+            self._tool_bubble = None  # new user turn — reset live tool tracker
         bubble = ChatBubble(self._scroll, role=role, text=text)
         # Telegram-style: large opposite-side margin constrains bubble to ~65% width.
         # Avatar (28px) + gaps are inside the bubble; outer padx just limits the row.
@@ -164,6 +168,7 @@ class ChatPanel(ctk.CTkFrame):
         return bubble
 
     def begin_assistant_stream(self) -> None:
+        self._tool_bubble = None
         if self._streaming_bubble is None:
             self._streaming_bubble = self.add_message("assistant", "")
             self._streaming_bubble.start_spinner()
@@ -185,6 +190,11 @@ class ChatPanel(ctk.CTkFrame):
 
     def begin_tool_stream(self) -> None:
         """Start a new tool_log bubble for tool call output."""
+        # Stop spinner on any open assistant bubble (e.g. from a prior begin_assistant_stream)
+        if self._streaming_bubble is not None and self._streaming_bubble.role == "assistant":
+            if self._streaming_bubble._spinning:
+                self._streaming_bubble.stop_spinner()
+            self._streaming_bubble = None
         self._streaming_bubble = self.add_message("tool_log", "")
 
     def append_tool_chunk(self, chunk: str, final: bool = False) -> None:
@@ -198,6 +208,25 @@ class ChatPanel(ctk.CTkFrame):
             self._streaming_bubble.append_text(chunk)
         if final:
             self._streaming_bubble = None
+        self._do_auto_scroll()
+
+    def add_tool_call(self, name: str, args: str) -> None:
+        """Add a live structured tool call item to the tool_log bubble."""
+        if self._tool_bubble is None or self._tool_bubble.role != "tool_log":
+            # Stop any open assistant spinner before starting tool calls
+            if self._streaming_bubble is not None and self._streaming_bubble.role == "assistant":
+                if self._streaming_bubble._spinning:
+                    self._streaming_bubble.stop_spinner()
+                self._streaming_bubble = None
+            self._tool_bubble = self.add_message("tool_log", "")
+        self._tool_bubble.add_tool_item(name, args)
+        self._do_auto_scroll()
+
+    def complete_tool_call(self, name: str, result: str) -> None:
+        """Complete the last matching live tool call item."""
+        if self._tool_bubble is None:
+            return
+        self._tool_bubble.complete_tool_item(name, result)
         self._do_auto_scroll()
 
     def clear_search(self) -> None:

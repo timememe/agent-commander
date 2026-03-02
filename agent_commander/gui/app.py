@@ -402,9 +402,13 @@ class TriptychApp:
         text = "    ·    ".join(agent_parts)
         self._status_bar.set_usage(text, remaining_percent=min_remaining)
 
-    def receive_tool_chunk(self, session_id: str, chunk: str, final: bool = False) -> None:
-        """Called from asyncio thread — routes tool call log to UI thread."""
-        self._run_on_ui(lambda: self._receive_tool_chunk_ui(session_id, chunk, final))
+    def receive_tool_start(self, session_id: str, name: str, args: str) -> None:
+        """Called from asyncio thread — tool call started."""
+        self._run_on_ui(lambda: self._receive_tool_start_ui(session_id, name, args))
+
+    def receive_tool_end(self, session_id: str, name: str, result: str) -> None:
+        """Called from asyncio thread — tool call completed."""
+        self._run_on_ui(lambda: self._receive_tool_end_ui(session_id, name, result))
 
     def receive_assistant_chunk(self, session_id: str, chunk: str, final: bool = False) -> None:
         """Receive assistant response chunk and render/update session."""
@@ -468,8 +472,6 @@ class TriptychApp:
                 full_text = f"<context>\n{combined_ctx}\n</context>\n\n{text}"
 
         session.messages.append(ChatMessage(role="user", text=text))
-        session.messages.append(ChatMessage(role="assistant", text=""))
-        session.streaming = True
         session.request_started_at = time.monotonic()
 
         if is_first_user_msg:
@@ -485,7 +487,6 @@ class TriptychApp:
 
         if self._chat_panel:
             self._chat_panel.add_message("user", text)
-            self._chat_panel.begin_assistant_stream()
         if self._input_bar:
             self._input_bar.set_typing(True)
 
@@ -538,39 +539,44 @@ class TriptychApp:
 
         self._refresh_sidebar()
 
-    def _receive_tool_chunk_ui(self, session_id: str, chunk: str, final: bool) -> None:
-        """Append a tool call log chunk to a separate tool_log bubble."""
+    def _receive_tool_start_ui(self, session_id: str, name: str, args: str) -> None:
+        """Tool call started — create/update tool_log entry and UI item."""
         session = self._sm.sessions.get(session_id)
         if session is None:
             return
 
-        # Guard: empty final signal with no open tool_log → nothing to do
-        if final and not chunk:
-            last_role = session.messages[-1].role if session.messages else None
-            if last_role != "tool_log":
-                return
-
-        # If assistant bubble is currently streaming, finalize it before the tool log
+        # Finalize any open assistant stream before tool calls
         if session.streaming and session.messages and session.messages[-1].role == "assistant":
             session.streaming = False
-            full_text = session.messages[-1].text
-            self._sm.persist_message(session_id, "assistant", full_text)
+            self._sm.persist_message(session_id, "assistant", session.messages[-1].text)
             if session_id == self._sm.active_session_id and self._chat_panel:
                 self._chat_panel.append_assistant_chunk("", final=True)
 
-        # Ensure last message is tool_log
+        # Ensure a tool_log message exists in session state
         if not session.messages or session.messages[-1].role != "tool_log":
             session.messages.append(ChatMessage(role="tool_log", text=""))
-            if session_id == self._sm.active_session_id and self._chat_panel:
-                self._chat_panel.begin_tool_stream()
 
-        session.messages[-1].text += chunk
+        short_args = args[:200] + "..." if len(args) > 200 else args
+        session.messages[-1].text += f"`{name}({short_args})`\n"
 
-        if final:
+        if session_id == self._sm.active_session_id and self._chat_panel:
+            self._chat_panel.add_tool_call(name, args)
+
+        self._refresh_sidebar()
+
+    def _receive_tool_end_ui(self, session_id: str, name: str, result: str) -> None:
+        """Tool call completed — persist result and update UI item."""
+        session = self._sm.sessions.get(session_id)
+        if session is None:
+            return
+
+        if session.messages and session.messages[-1].role == "tool_log":
+            preview = result[:500] + "..." if len(result) > 500 else result
+            session.messages[-1].text += f"```\n{preview}\n```\n\n"
             self._sm.persist_message(session_id, "tool_log", session.messages[-1].text)
 
         if session_id == self._sm.active_session_id and self._chat_panel:
-            self._chat_panel.append_tool_chunk(chunk, final=final)
+            self._chat_panel.complete_tool_call(name, result)
 
         self._refresh_sidebar()
 
@@ -680,7 +686,7 @@ class TriptychApp:
                 session.schedule_def.enabled = True
                 session.schedule_prompt = prompt
                 # Re-register new cron job
-                self._start_session_runtime(session)
+                self._start_session_runtime(session, register_schedule=True)
             self._show_chat_panel()
             self._render_active_session()
             self._refresh_sidebar()
@@ -701,7 +707,7 @@ class TriptychApp:
         self._show_chat_panel()
         self._render_active_session()
         self._refresh_sidebar()
-        self._start_session_runtime(session)
+        self._start_session_runtime(session, register_schedule=bool(sched))
 
     def _on_select_project(self, project_id: str) -> None:
         """Show project panel when a project header is clicked."""
@@ -1234,16 +1240,17 @@ class TriptychApp:
         self._sidebar.set_agent_connected("gemini", True)
         self._sidebar.set_agent_connected("codex", True)
 
-    def _start_session_runtime(self, session: SessionState) -> None:
+    def _start_session_runtime(self, session: SessionState, *, register_schedule: bool = False) -> None:
         if self._on_session_start is None:
             return
         self._on_session_start(session.session_id, session.agent, session.workdir or None)
         # Register cron job for schedule sessions
         if (
-            session.mode == "schedule"
+            register_schedule
+            and self._on_schedule_create is not None
+            and session.mode == "schedule"
             and session.schedule_def
             and session.schedule_def.cron_expr
-            and self._on_schedule_create is not None
         ):
             self._on_schedule_create(
                 session.session_id,
@@ -1273,7 +1280,7 @@ class TriptychApp:
             # Restart — re-register cron job
             if session.schedule_def:
                 session.schedule_def.enabled = True
-            self._start_session_runtime(session)
+            self._start_session_runtime(session, register_schedule=True)
         self._render_active_session()
 
     def _edit_schedule_session(self, session_id: str) -> None:

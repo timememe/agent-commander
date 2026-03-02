@@ -39,6 +39,8 @@ def _build_cron_expr(repeat: str, days: list[str], hour: int, minute: int) -> st
         return _INTERVAL_CRON[repeat]
     h, m = f"{hour:02d}", f"{minute:02d}"
     if repeat in ("Once", "Daily"):
+        if repeat == "Once":
+            return f"once:{h}:{m}"
         return f"{m} {h} * * *"
     elif repeat == "Weekly":
         day_map = {"Mon": "1", "Tue": "2", "Wed": "3", "Thu": "4",
@@ -327,7 +329,18 @@ class NewSessionPanel(ctk.CTkFrame):
     # ── Load existing ──────────────────────────────────────────────────────
 
     def _load_existing(self, sched: ScheduleDef | None, prompt: str) -> None:
-        if sched and sched.display and hasattr(self, "_repeat_var"):
+        expr = (sched.cron_expr or "").strip().lower() if sched else ""
+        if expr.startswith("once:") and hasattr(self, "_repeat_var"):
+            self._repeat_var.set("Once")
+            try:
+                hhmm = expr.split(":", 1)[1]
+                hh_s, mm_s = hhmm.split(":", 1)
+                self._hour_var.set(f"{int(hh_s):02d}")
+                self._min_var.set(f"{int(mm_s):02d}")
+            except Exception:
+                pass
+            self._on_repeat_change("Once")
+        elif sched and sched.display and hasattr(self, "_repeat_var"):
             if sched.display in _INTERVAL_CRON:
                 self._repeat_var.set(sched.display)
                 self._on_repeat_change(sched.display)

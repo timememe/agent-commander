@@ -19,7 +19,8 @@ from agent_commander.session.manager import SessionManager
 
 StreamCallback = Callable[[InboundMessage, str, bool], Awaitable[None]]
 TerminalCallback = Callable[[InboundMessage, str, bool], Awaitable[None]]
-ToolCallback = Callable[[InboundMessage, str, bool], Awaitable[None]]
+ToolStartCallback = Callable[[InboundMessage, str, str], Awaitable[None]]  # msg, name, args
+ToolEndCallback = Callable[[InboundMessage, str, str], Awaitable[None]]    # msg, name, result
 
 
 class AgentLoop:
@@ -37,7 +38,8 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         stream_callback: StreamCallback | None = None,
         terminal_callback: TerminalCallback | None = None,
-        tool_callback: ToolCallback | None = None,
+        tool_start_callback: ToolStartCallback | None = None,
+        tool_end_callback: ToolEndCallback | None = None,
     ) -> None:
         self.bus = bus
         self.workspace = workspace
@@ -45,7 +47,8 @@ class AgentLoop:
         self.provider = cli_provider or CLIAgentProvider()
         self.stream_callback = stream_callback
         self.terminal_callback = terminal_callback
-        self.tool_callback = tool_callback
+        self.tool_start_callback = tool_start_callback
+        self.tool_end_callback = tool_end_callback
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -184,23 +187,25 @@ class AgentLoop:
 
         chunks: list[str] = []
         streamed = False
-        tool_events_sent = False
 
         async def _on_raw(raw_chunk: str) -> None:
             if self.terminal_callback and raw_chunk:
                 await self.terminal_callback(msg, raw_chunk, False)
 
-        async def _on_tool_event(tool_chunk: str) -> None:
-            nonlocal tool_events_sent
-            if self.tool_callback and tool_chunk:
-                await self.tool_callback(msg, tool_chunk, False)
-                tool_events_sent = True
+        async def _on_tool_start(event: dict) -> None:
+            if self.tool_start_callback:
+                await self.tool_start_callback(msg, event.get("name", ""), event.get("args", ""))
+
+        async def _on_tool_end(event: dict) -> None:
+            if self.tool_end_callback:
+                await self.tool_end_callback(msg, event.get("name", ""), event.get("result", ""))
 
         async for chunk in self.provider.send_and_receive(
             message=prompt,
             session=provider_session,
             on_raw=_on_raw if self.terminal_callback else None,
-            on_tool_event=_on_tool_event if self.tool_callback else None,
+            on_tool_start=_on_tool_start if self.tool_start_callback else None,
+            on_tool_end=_on_tool_end if self.tool_end_callback else None,
         ):
             if not chunk:
                 continue
@@ -211,8 +216,6 @@ class AgentLoop:
 
         if self.stream_callback and streamed:
             await self.stream_callback(msg, "", True)
-        if self.tool_callback and tool_events_sent:
-            await self.tool_callback(msg, "", True)
         if self.terminal_callback:
             await self.terminal_callback(msg, "", True)
 

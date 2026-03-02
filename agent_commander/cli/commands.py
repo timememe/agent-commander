@@ -403,8 +403,11 @@ def gui(
     async def terminal_callback(msg: "InboundMessage", chunk: str, final: bool) -> None:
         await gui_channel.emit_terminal_chunk(session_id=msg.chat_id, chunk=chunk, final=final)
 
-    async def tool_callback(msg: "InboundMessage", chunk: str, final: bool) -> None:
-        await gui_channel.emit_tool_chunk(session_id=msg.chat_id, chunk=chunk, final=final)
+    async def tool_start_callback(msg: "InboundMessage", name: str, args: str) -> None:
+        await gui_channel.emit_tool_start(session_id=msg.chat_id, name=name, args=args)
+
+    async def tool_end_callback(msg: "InboundMessage", name: str, result: str) -> None:
+        await gui_channel.emit_tool_end(session_id=msg.chat_id, name=name, result=result)
 
     agent_loop = AgentLoop(
         bus=bus,
@@ -413,7 +416,8 @@ def gui(
         cli_provider=cli_provider,
         stream_callback=stream_callback,
         terminal_callback=terminal_callback,
-        tool_callback=tool_callback,
+        tool_start_callback=tool_start_callback,
+        tool_end_callback=tool_end_callback,
     )
 
     bus.subscribe_outbound("gui", gui_channel.send)

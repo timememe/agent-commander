@@ -38,7 +38,7 @@ def _build_cron_expr(repeat: str, days: list[str], hour: int, minute: int) -> st
     h = f"{hour:02d}"
     m = f"{minute:02d}"
     if repeat == "Once":
-        return f"{m} {h} * * *"
+        return f"once:{h}:{m}"
     elif repeat == "Daily":
         return f"{m} {h} * * *"
     elif repeat == "Weekly":
@@ -208,6 +208,18 @@ class ScheduleDialog(ctk.CTkToplevel):
             pass
 
     def _load_existing(self, sched: ScheduleDef) -> None:
+        expr = (sched.cron_expr or "").strip().lower()
+        if expr.startswith("once:"):
+            self._repeat_var.set("Once")
+            try:
+                hhmm = expr.split(":", 1)[1]
+                hh_s, mm_s = hhmm.split(":", 1)
+                self._hour_var.set(f"{int(hh_s):02d}")
+                self._min_var.set(f"{int(mm_s):02d}")
+            except Exception:
+                pass
+            self._on_repeat_change("Once")
+            return
         if sched.display:
             # Try to restore interval mode from display string
             if sched.display in _INTERVAL_CRON:

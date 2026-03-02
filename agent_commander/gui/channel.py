@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from agent_commander.bus.events import InboundMessage, OutboundMessage
@@ -136,12 +137,19 @@ class GUIChannel:
             return
         app.receive_assistant_chunk(session_id=session_id, chunk=chunk, final=final)
 
-    async def emit_tool_chunk(self, session_id: str, chunk: str, final: bool = False) -> None:
-        """Streaming tool call log for separate tool_log bubble in chat."""
+    async def emit_tool_start(self, session_id: str, name: str, args: str) -> None:
+        """Tool call started — structured event."""
         app = self._app
         if app is None:
             return
-        app.receive_tool_chunk(session_id=session_id, chunk=chunk, final=final)
+        app.receive_tool_start(session_id=session_id, name=name, args=args)
+
+    async def emit_tool_end(self, session_id: str, name: str, result: str) -> None:
+        """Tool call completed — structured event."""
+        app = self._app
+        if app is None:
+            return
+        app.receive_tool_end(session_id=session_id, name=name, result=result)
 
     async def emit_terminal_chunk(self, session_id: str, chunk: str, final: bool = False) -> None:
         """Streaming terminal text for terminal panel (raw PTY output)."""
@@ -258,11 +266,35 @@ class GUIChannel:
 
             async def _do_register() -> None:
                 from agent_commander.cron.types import CronSchedule
+                raw_expr = (cron_expr or "").strip()
+                delete_after_run = False
+                schedule: CronSchedule
+
+                if raw_expr.lower().startswith("once:"):
+                    try:
+                        hhmm = raw_expr.split(":", 1)[1]
+                        hh_s, mm_s = hhmm.split(":", 1)
+                        hour = max(0, min(23, int(hh_s)))
+                        minute = max(0, min(59, int(mm_s)))
+                        now = datetime.now()
+                        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        if target <= now:
+                            target += timedelta(days=1)
+                        schedule = CronSchedule(kind="at", at_ms=int(target.timestamp() * 1000))
+                        delete_after_run = True
+                    except Exception:
+                        schedule = CronSchedule(kind="cron", expr=raw_expr)
+                else:
+                    schedule = CronSchedule(kind="cron", expr=raw_expr)
+
+                # De-duplicate schedule job for this session before re-registering.
+                await cron_svc.remove_jobs_by_channel(session_id)
                 cron_svc.add_job(
                     name=f"sched-{session_id[:12]}",
-                    schedule=CronSchedule(kind="cron", expr=cron_expr),
+                    schedule=schedule,
                     message=prompt or "Run scheduled task.",
                     channel=session_id,
+                    delete_after_run=delete_after_run,
                 )
 
             asyncio.run_coroutine_threadsafe(_do_register(), loop)

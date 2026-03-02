@@ -36,6 +36,8 @@ class MarkdownView(ctk.CTkTextbox):
         self._min_height = int(kwargs.pop("min_height", 36))
         self._max_height = int(kwargs.pop("max_height", 2000))
         self._last_height = 0
+        self._last_width = 0
+        self._autosize_guard = False
         super().__init__(
             master,
             wrap=wrap,
@@ -46,6 +48,10 @@ class MarkdownView(ctk.CTkTextbox):
             activate_scrollbars=False,
             **kwargs,
         )
+        # Disable internal grid propagation so configure(height=target) controls
+        # our size exactly instead of the internal CTkTextbox canvas overriding it.
+        self.grid_propagate(False)
+
         # Keep state normal so selection works; block edits via key handler
         self.tag_config("search_hit", background="#4A3F1D", foreground=theme.COLOR_TEXT)
         self.tag_config("search_active", background="#C58E2A", foreground="#111111")
@@ -70,6 +76,11 @@ class MarkdownView(ctk.CTkTextbox):
             tw.bind("<Button-1>", lambda e: e.widget.focus_set(), add=True)
         else:
             self.bind("<Button-1>", lambda e: e.widget.focus_set(), add=True)
+
+        # Bind to the inner text widget's <Configure> — it fires after the text widget
+        # has been given its actual rendered width, so count(-displaylines) is correct.
+        if tw is not None:
+            tw.bind("<Configure>", self._on_textbox_configure, add=True)
 
         self.after_idle(self._autosize_to_content)
 
@@ -172,37 +183,88 @@ class MarkdownView(ctk.CTkTextbox):
             self.tag_add("search_active", start, end)
             self.see(start)
 
+    def _on_textbox_configure(self, event: object) -> None:
+        """Re-run autosize when the inner text widget gets its actual rendered width."""
+        w = int(getattr(event, "width", 0) or 0)
+        if w > 10 and w != self._last_width:
+            self._last_width = w
+            # Use a small delay so Tk finishes computing the wrapped-line layout
+            # before we call dlineinfo / count on the text widget.
+            self.after(10, self._autosize_to_content)
+
     def _autosize_to_content(self) -> None:
         """
         Resize textbox height to fit rendered text lines.
 
-        Guards against measuring before layout is complete: if the widget
-        hasn't been given a real width yet (winfo_width < 20), defers the
-        measurement by 60 ms to avoid tk's count(-displaylines) returning
-        a wildly large value when width ≈ 1 px (every char on its own line).
-        Uses a change-guard so configure() is only called when height changes.
+        Primary method: dlineinfo("end-1c") gives the exact pixel offset of
+        the last display line, so we don't need to guess line height.
+        Fallback: count(-displaylines) * estimated line height.
+
+        Uses a re-entrancy guard so recursive calls from update_idletasks()
+        are skipped, and a change-guard so configure() is only called when
+        the computed height differs from the last set value.
         """
+        if self._autosize_guard:
+            return
         text_widget = getattr(self, "_textbox", None)
         if text_widget is None:
             return
-
-        # Widget not laid out yet — wait for geometry to propagate
         if self.winfo_width() < 20:
-            self.after(60, self._autosize_to_content)
-            return
+            return  # <Configure> will fire again once the geometry manager assigns a real width
 
+        self._autosize_guard = True
         try:
-            counted = text_widget.count("1.0", "end-1c", "displaylines")
-            display_lines = int(counted[0]) if counted else 1
-        except Exception:
-            try:
-                display_lines = int(str(text_widget.index("end-1c")).split(".")[0])
-            except Exception:
-                display_lines = 1
+            target = self._measure_content_height(text_widget)
+            if target != self._last_height:
+                self._last_height = target
+                self.configure(height=target)
+                # Ensure parent frames relayout now rather than waiting for the
+                # next idle cycle — important when called during streaming.
+                try:
+                    self.update_idletasks()
+                except Exception:
+                    pass
+        finally:
+            self._autosize_guard = False
 
+    def _measure_content_height(self, text_widget: object) -> int:
+        """Return the desired CTk-logical-pixel height for the current content.
+
+        Strategy:
+          1. count(-displaylines): works regardless of viewport, accurate after
+             Tk has recomputed the layout (ensured by the 10ms delay in
+             _on_textbox_configure).
+          2. dlineinfo("end-1c"): pixel-accurate but only works when the last
+             line is in the text widget's viewport.  Used as a cross-check.
+        """
         line_height_px = max(18, int(theme.FONT_SIZE * 1.75))
-        target = max(self._min_height, display_lines * line_height_px + 8)
-        target = min(self._max_height, target)
-        if target != self._last_height:
-            self._last_height = target
-            self.configure(height=target)
+
+        # --- primary: count display lines (viewport-independent) ---
+        display_lines = 0
+        try:
+            counted = text_widget.count("1.0", "end-1c", "displaylines")  # type: ignore[union-attr]
+            display_lines = int(counted[0]) if counted else 0
+        except Exception:
+            pass
+
+        if display_lines > 0:
+            target = max(self._min_height, display_lines * line_height_px + 8)
+        else:
+            # --- secondary: dlineinfo (pixel-accurate when content is visible) ---
+            try:
+                info = text_widget.dlineinfo("end-1c")  # type: ignore[union-attr]
+                if info:
+                    content_h_phys = int(info[1]) + int(info[3])
+                    content_h_logical = self._reverse_widget_scaling(content_h_phys)
+                    target = max(self._min_height, int(content_h_logical) + 8)
+                else:
+                    raise ValueError("dlineinfo returned None")
+            except Exception:
+                # --- last resort: logical line count ---
+                try:
+                    display_lines = int(str(text_widget.index("end-1c")).split(".")[0])  # type: ignore[union-attr]
+                except Exception:
+                    display_lines = 1
+                target = max(self._min_height, display_lines * line_height_px + 8)
+
+        return min(self._max_height, target)

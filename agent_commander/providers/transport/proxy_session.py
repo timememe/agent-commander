@@ -69,7 +69,8 @@ class _RequestResult:
 
 
 _MAX_TOOL_ROUNDS = 25
-_EventQueue = "queue.Queue[tuple[str, str | Exception | None]]"
+_ToolEvent = "dict[str, str]"
+_EventQueue = "queue.Queue[tuple[str, str | _ToolEvent | Exception | None]]"
 
 
 class ProxyAPIProvider:
@@ -106,7 +107,8 @@ class ProxyAPIProvider:
         message: str,
         session: ProxySession,
         on_raw: Callable[[str], Awaitable[None]] | None = None,
-        on_tool_event: Callable[[str], Awaitable[None]] | None = None,
+        on_tool_start: Callable[[dict], Awaitable[None]] | None = None,
+        on_tool_end: Callable[[dict], Awaitable[None]] | None = None,
     ) -> AsyncIterator[str]:
         event_q: _EventQueue = queue.Queue()
         done = threading.Event()
@@ -137,9 +139,14 @@ class ProxyAPIProvider:
                     yield payload
                 continue
 
-            if kind == "tool_chunk":
-                if on_tool_event is not None and isinstance(payload, str) and payload:
-                    await on_tool_event(payload)
+            if kind == "tool_start":
+                if on_tool_start is not None and isinstance(payload, dict):
+                    await on_tool_start(payload)
+                continue
+
+            if kind == "tool_end":
+                if on_tool_end is not None and isinstance(payload, dict):
+                    await on_tool_end(payload)
                 continue
 
             if kind == "error":
@@ -191,10 +198,9 @@ class ProxyAPIProvider:
                 assistant_msg["content"] = text
             messages.append(assistant_msg)
 
-            # Execute each tool call — emit as tool_chunk (separate bubble)
+            # Execute each tool call — emit structured start/end events
             for tc in result.tool_calls:
-                short_args = tc.arguments[:120] + "..." if len(tc.arguments) > 120 else tc.arguments
-                event_q.put(("tool_chunk", f"`{tc.name}({short_args})`\n"))
+                event_q.put(("tool_start", {"id": tc.id, "name": tc.name, "args": tc.arguments}))
 
                 tool_result = execute_tool(
                     name=tc.name,
@@ -203,10 +209,7 @@ class ProxyAPIProvider:
                     extension_store=self._extension_store,
                 )
 
-                preview = tool_result[:500]
-                if len(tool_result) > 500:
-                    preview += "..."
-                event_q.put(("tool_chunk", f"```\n{preview}\n```\n\n"))
+                event_q.put(("tool_end", {"id": tc.id, "name": tc.name, "result": tool_result}))
 
                 messages.append({
                     "role": "tool",
