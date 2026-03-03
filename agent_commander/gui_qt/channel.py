@@ -1,39 +1,29 @@
-"""GUI channel bridge for MessageBus integration."""
+"""Qt GUI channel — mirrors GUIChannel interface, backed by PySide6."""
 
 from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from agent_commander.bus.events import InboundMessage, OutboundMessage
 from agent_commander.bus.queue import MessageBus
-from agent_commander.gui.app import TriptychApp
-from agent_commander.session.extension_store import ExtensionStore
 from agent_commander.session.gui_store import GUIStore
-from agent_commander.session.skill_store import SkillStore
 
 if TYPE_CHECKING:
-    from agent_commander.cron.service import CronService
-    from agent_commander.cron.types import CronJob
+    from agent_commander.session.skill_store import SkillStore
+    from agent_commander.session.extension_store import ExtensionStore
     from agent_commander.session.project_store import ProjectStore
     from agent_commander.usage.monitor import UsageMonitor
+    from agent_commander.gui_qt.app import QtApp
 
 
-@dataclass(frozen=True)
-class GUIInbound:
-    """Input payload from GUI to bus."""
+class QtChannel:
+    """Bridge between the Qt GUI and the MessageBus.
 
-    session_id: str
-    text: str
-    agent: str
-    cwd: str | None = None
-
-
-class GUIChannel:
-    """Bridge between GUI events and message bus."""
+    Identical external interface to GUIChannel; only the rendering backend
+    (PySide6 instead of customtkinter) differs.
+    """
 
     name = "gui"
 
@@ -50,10 +40,10 @@ class GUIChannel:
         long_task_notify_s: float = 12.0,
         server_manager: object | None = None,
         session_store: GUIStore | None = None,
-        skill_store: SkillStore | None = None,
-        cron_service: "CronService | None" = None,
+        skill_store: "SkillStore | None" = None,
+        cron_service: object | None = None,
         project_store: "ProjectStore | None" = None,
-        extension_store: ExtensionStore | None = None,
+        extension_store: "ExtensionStore | None" = None,
         usage_monitors: "list[UsageMonitor] | None" = None,
     ) -> None:
         self.bus = bus
@@ -73,47 +63,35 @@ class GUIChannel:
         self.extension_store = extension_store
         self.usage_monitors: list[UsageMonitor] = usage_monitors or []
 
-        self._app: TriptychApp | None = None
+        self._app: QtApp | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._stopped = threading.Event()
 
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     async def start(self) -> None:
-        """Start GUI in separate thread and keep coroutine alive while GUI runs."""
+        """Start Qt GUI in a separate thread; keep coroutine alive while GUI runs."""
         if self._thread and self._thread.is_alive():
             return
 
         self._loop = asyncio.get_running_loop()
         self._stopped.clear()
 
-        # Register cron job callback if service is available
-        if self.cron_service is not None:
-            self.cron_service.on_job = self._handle_cron_job
-
-        self._thread = threading.Thread(target=self._run_gui, daemon=True, name="agent-commander-gui")
+        self._thread = threading.Thread(
+            target=self._run_gui,
+            daemon=True,
+            name="agent-commander-gui-qt",
+        )
         self._thread.start()
 
         while not self._stopped.is_set():
             await asyncio.sleep(0.2)
 
-    async def _handle_cron_job(self, job: "CronJob") -> str | None:
-        """Called by CronService when a scheduled job fires."""
-        session_id = (job.payload.channel or "").strip()
-        if not session_id:
-            return None
-        agent = self.default_agent
-        cwd = self.default_cwd
-        message = job.payload.message or "Run scheduled task."
-        await self.on_user_input(
-            text=message,
-            session_id=session_id,
-            agent=agent,
-            cwd_override=cwd,
-        )
-        return None
-
     async def stop(self) -> None:
-        """Stop GUI runtime."""
+        """Stop Qt GUI runtime."""
         app = self._app
         if app:
             app.stop()
@@ -122,44 +100,59 @@ class GUIChannel:
         if thread and thread.is_alive():
             thread.join(timeout=1.0)
 
+    # ------------------------------------------------------------------
+    # Outbound (bus → GUI)
+    # ------------------------------------------------------------------
+
     async def send(self, msg: OutboundMessage) -> None:
-        """Render assistant response on GUI."""
+        """Render a complete assistant message (non-streamed path)."""
         app = self._app
         if app is None:
             return
         streamed = bool((msg.metadata or {}).get("streamed"))
         if streamed:
             return
-        app.receive_assistant_chunk(session_id=msg.chat_id, chunk=msg.content, final=True)
+        app._run_on_ui(
+            lambda: app.receive_assistant_chunk(
+                session_id=msg.chat_id, chunk=msg.content, final=True
+            )
+        )
 
     async def emit_stream_chunk(self, session_id: str, chunk: str, final: bool = False) -> None:
-        """Streaming assistant text for chat panel (filtered output)."""
+        """Deliver a streaming chunk to the active chat bubble."""
         app = self._app
         if app is None:
             return
-        app.receive_assistant_chunk(session_id=session_id, chunk=chunk, final=final)
+        app._run_on_ui(
+            lambda: app.receive_assistant_chunk(
+                session_id=session_id, chunk=chunk, final=final
+            )
+        )
 
     async def emit_tool_start(self, session_id: str, name: str, args: str) -> None:
-        """Tool call started — structured event."""
+        """Tool call started (stub in v1)."""
         app = self._app
         if app is None:
             return
-        app.receive_tool_start(session_id=session_id, name=name, args=args)
+        app._run_on_ui(
+            lambda: app.receive_tool_start(session_id=session_id, name=name, args=args)
+        )
 
     async def emit_tool_end(self, session_id: str, name: str, result: str) -> None:
-        """Tool call completed — structured event."""
+        """Tool call completed (stub in v1)."""
         app = self._app
         if app is None:
             return
-        app.receive_tool_end(session_id=session_id, name=name, result=result)
+        app._run_on_ui(
+            lambda: app.receive_tool_end(session_id=session_id, name=name, result=result)
+        )
 
     async def emit_terminal_chunk(self, session_id: str, chunk: str, final: bool = False) -> None:
-        """Streaming terminal text for terminal panel (raw PTY output)."""
-        app = self._app
-        if app is None:
-            return
-        if chunk:
-            app.receive_terminal_chunk(chunk, session_id=session_id)
+        """Terminal PTY output — not rendered in Qt v1."""
+
+    # ------------------------------------------------------------------
+    # Inbound (GUI → bus)
+    # ------------------------------------------------------------------
 
     async def on_user_input(
         self,
@@ -169,14 +162,13 @@ class GUIChannel:
         cwd_override: str | None = None,
         extra_meta: dict | None = None,
     ) -> None:
-        """Publish user input from GUI into inbound queue."""
+        """Publish user message from the GUI into the inbound queue."""
         metadata: dict[str, object] = {"agent": agent}
         cwd = (cwd_override or "").strip() or self.agent_workdirs.get(agent) or self.default_cwd
         if cwd:
             metadata["cwd"] = cwd
         if extra_meta:
             metadata.update(extra_meta)
-
         await self.bus.publish_inbound(
             InboundMessage(
                 channel=self.name,
@@ -193,12 +185,11 @@ class GUIChannel:
         agent: str,
         cwd_override: str | None = None,
     ) -> None:
-        """Prewarm a chat session by starting selected agent runtime immediately."""
+        """Prewarm a chat session by initialising the agent runtime."""
         metadata: dict[str, object] = {"agent": agent, "init_session": True}
         cwd = (cwd_override or "").strip() or self.agent_workdirs.get(agent) or self.default_cwd
         if cwd:
             metadata["cwd"] = cwd
-
         await self.bus.publish_inbound(
             InboundMessage(
                 channel=self.name,
@@ -209,10 +200,42 @@ class GUIChannel:
             )
         )
 
+    # ------------------------------------------------------------------
+    # GUI thread runner
+    # ------------------------------------------------------------------
+
     def _run_gui(self) -> None:
-        from agent_commander.gui import theme as gui_theme
-        if self.font_size > 0:
-            gui_theme.FONT_SIZE = self.font_size
+        import os
+        import sys
+
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                    "AgentCommander.Desktop"
+                )
+            except Exception:
+                pass
+
+        from PySide6.QtGui import QIcon
+        from PySide6.QtWidgets import QApplication
+
+        from agent_commander.gui_qt.app import QtApp
+        from agent_commander.gui_qt import theme
+
+        qt_app = QApplication.instance()
+        if qt_app is None:
+            qt_app = QApplication(sys.argv)
+
+        qt_app.setApplicationName("Agent Commander")
+        icon_path = theme.find_icon()
+        if icon_path:
+            icon = QIcon(icon_path)
+            if not icon.isNull():
+                qt_app.setWindowIcon(icon)
+
+        qt_app.setStyleSheet(theme.app_stylesheet())
 
         def _input_callback(
             session_id: str,
@@ -234,16 +257,11 @@ class GUIChannel:
                 ),
                 loop,
             )
+            future.add_done_callback(_swallow_exceptions)
 
-            def _done_callback(fut: "asyncio.Future[None]") -> None:
-                try:
-                    fut.result()
-                except Exception:
-                    pass
-
-            future.add_done_callback(_done_callback)
-
-        def _session_start_callback(session_id: str, agent: str, cwd_override: str | None = None) -> None:
+        def _session_start_callback(
+            session_id: str, agent: str, cwd_override: str | None = None
+        ) -> None:
             loop = self._loop
             if loop is None:
                 return
@@ -255,100 +273,36 @@ class GUIChannel:
                 ),
                 loop,
             )
-
-            def _done_callback(fut: "asyncio.Future[None]") -> None:
-                try:
-                    fut.result()
-                except Exception:
-                    pass
-
-            future.add_done_callback(_done_callback)
-
-        def _schedule_create_callback(session_id: str, prompt: str, cron_expr: str) -> None:
-            cron_svc = self.cron_service
-            loop = self._loop
-            if cron_svc is None or loop is None:
-                return
-
-            async def _do_register() -> None:
-                from agent_commander.cron.types import CronSchedule
-                raw_expr = (cron_expr or "").strip()
-                delete_after_run = False
-                schedule: CronSchedule
-
-                if raw_expr.lower().startswith("once:"):
-                    try:
-                        hhmm = raw_expr.split(":", 1)[1]
-                        hh_s, mm_s = hhmm.split(":", 1)
-                        hour = max(0, min(23, int(hh_s)))
-                        minute = max(0, min(59, int(mm_s)))
-                        now = datetime.now()
-                        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                        if target <= now:
-                            target += timedelta(days=1)
-                        schedule = CronSchedule(kind="at", at_ms=int(target.timestamp() * 1000))
-                        delete_after_run = True
-                    except Exception:
-                        schedule = CronSchedule(kind="cron", expr=raw_expr)
-                else:
-                    schedule = CronSchedule(kind="cron", expr=raw_expr)
-
-                # De-duplicate schedule job for this session before re-registering.
-                await cron_svc.remove_jobs_by_channel(session_id)
-                cron_svc.add_job(
-                    name=f"sched-{session_id[:12]}",
-                    schedule=schedule,
-                    message=prompt or "Run scheduled task.",
-                    channel=session_id,
-                    delete_after_run=delete_after_run,
-                )
-
-            asyncio.run_coroutine_threadsafe(_do_register(), loop)
-
-        def _schedule_delete_callback(session_id: str) -> None:
-            cron_svc = self.cron_service
-            loop = self._loop
-            if cron_svc is None or loop is None:
-                return
-
-            async def _do_remove() -> None:
-                await cron_svc.remove_jobs_by_channel(session_id)
-
-            asyncio.run_coroutine_threadsafe(_do_remove(), loop)
+            future.add_done_callback(_swallow_exceptions)
 
         def _close_callback() -> None:
             self._stopped.set()
 
-        self._app = TriptychApp(
+        self._app = QtApp(
             on_user_input=_input_callback,
             on_session_start=_session_start_callback,
-            on_schedule_create=_schedule_create_callback,
-            on_delete_session=_schedule_delete_callback,
             on_close=_close_callback,
             default_agent=self.default_agent,
             window_width=self.window_width,
             window_height=self.window_height,
-            notify_on_long_tasks=self.notify_on_long_tasks,
-            long_task_notify_s=self.long_task_notify_s,
-            server_manager=self.server_manager,
             session_store=self.session_store,
-            skill_store=self.skill_store,
-            project_store=self.project_store,
+            agent_workdirs=self.agent_workdirs,
+            server_manager=self.server_manager,
             extension_store=self.extension_store,
+            default_cwd=self.default_cwd,
         )
 
-        # Wire each usage monitor → app now that the app object exists.
+        # Wire each usage monitor -> app now that the app object exists.
         if self.usage_monitors:
             app_ref = self._app
 
-            # Show placeholder for each monitored agent immediately.
             names = " · ".join(
-                f"{m.agent.capitalize()}: checking…" for m in self.usage_monitors
+                f"{m.agent.capitalize()}: checking..." for m in self.usage_monitors
             )
             app_ref.set_usage_placeholder(names)
 
             for _monitor in self.usage_monitors:
-                _agent = _monitor.agent  # capture in closure
+                _agent = _monitor.agent
 
                 def _make_cb(agent: str):
                     def _on_usage_update(snapshot: object) -> None:
@@ -361,3 +315,10 @@ class GUIChannel:
             self._app.run()
         finally:
             self._stopped.set()
+
+
+def _swallow_exceptions(fut: "asyncio.Future") -> None:
+    try:
+        fut.result()
+    except Exception:
+        pass

@@ -257,13 +257,12 @@ def _build_proxy_server_manager(config: "Config"):
 @app.command()
 def gui(
     agent: str = typer.Option("", "--agent", help="Default agent (claude|gemini|codex)"),
+    backend: str = typer.Option("tk", "--backend", help="GUI backend: tk|qt"),
 ) -> None:
     """Start Agent Commander desktop GUI."""
     from agent_commander.agent.loop import AgentLoop
     from agent_commander.bus.queue import MessageBus
     from agent_commander.config.loader import load_config, save_config
-    from agent_commander.gui import theme as gui_theme
-    from agent_commander.gui.channel import GUIChannel
     from agent_commander.providers.runtime.registry import AGENT_DEFS
     from agent_commander.providers.provider import CLIAgentProvider
     from agent_commander.providers.transport.proxy_session import ProxyAPIProvider
@@ -311,9 +310,6 @@ def gui(
         console.print(f"[red]Unknown agent '{selected_agent}'. Expected: {choices}[/red]")
         raise typer.Exit(1)
 
-    if config.gui.font_size > 0:
-        gui_theme.FONT_SIZE = config.gui.font_size
-
     agent_workdirs = _apply_agent_overrides(config, workspace)
     default_cwd = agent_workdirs.get(selected_agent, str(workspace))
 
@@ -346,7 +342,7 @@ def gui(
     # codex  → quota % from TUI status bar
     # claude → plan/model info from startup splash (label only)
     # gemini → plan info from startup banner (label only)
-    from agent_commander.gui.notifications import send_notification
+    from agent_commander.utils.notifications import send_notification
 
     _probed_agents = {"codex", "claude", "gemini"}
     usage_monitors: list[UsageMonitor] = []
@@ -362,23 +358,50 @@ def gui(
         usage_monitors.append(_mon)
 
     bus = MessageBus()
-    gui_channel = GUIChannel(
-        bus=bus,
-        default_cwd=default_cwd,
-        default_agent=selected_agent,
-        window_width=config.gui.width,
-        window_height=config.gui.height,
-        agent_workdirs=agent_workdirs,
-        notify_on_long_tasks=config.gui.notify_on_long_tasks,
-        long_task_notify_s=config.gui.long_task_notify_s,
-        server_manager=server_manager,
-        session_store=session_store,
-        skill_store=skill_store,
-        cron_service=cron_service,
-        project_store=project_store,
-        extension_store=extension_store,
-        usage_monitors=usage_monitors,
-    )
+    _backend = (backend or "tk").strip().lower()
+    if _backend == "qt":
+        from agent_commander.gui_qt.channel import QtChannel
+        gui_channel = QtChannel(
+            bus=bus,
+            default_cwd=default_cwd,
+            default_agent=selected_agent,
+            window_width=config.gui.width,
+            window_height=config.gui.height,
+            font_size=config.gui.font_size,
+            agent_workdirs=agent_workdirs,
+            notify_on_long_tasks=config.gui.notify_on_long_tasks,
+            long_task_notify_s=config.gui.long_task_notify_s,
+            server_manager=server_manager,
+            session_store=session_store,
+            skill_store=skill_store,
+            cron_service=cron_service,
+            project_store=project_store,
+            extension_store=extension_store,
+            usage_monitors=usage_monitors,
+        )
+    elif _backend == "tk":
+        from agent_commander.gui.channel import GUIChannel
+        gui_channel = GUIChannel(
+            bus=bus,
+            default_cwd=default_cwd,
+            default_agent=selected_agent,
+            window_width=config.gui.width,
+            window_height=config.gui.height,
+            font_size=config.gui.font_size,
+            agent_workdirs=agent_workdirs,
+            notify_on_long_tasks=config.gui.notify_on_long_tasks,
+            long_task_notify_s=config.gui.long_task_notify_s,
+            server_manager=server_manager,
+            session_store=session_store,
+            skill_store=skill_store,
+            cron_service=cron_service,
+            project_store=project_store,
+            extension_store=extension_store,
+            usage_monitors=usage_monitors,
+        )
+    else:
+        console.print(f"[red]Unknown backend '{_backend}'. Expected: tk|qt[/red]")
+        raise typer.Exit(1)
     if config.proxy_api.enabled:
         cli_provider = ProxyAPIProvider(
             base_url=config.proxy_api.base_url,
