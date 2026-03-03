@@ -177,12 +177,14 @@ class AgentLoop:
         session = self.sessions.get_or_create(session_key)
         session_cwd = str(getattr(provider_session, "cwd", "") or metadata.get("cwd", str(self.workspace)) or str(self.workspace))
 
+        role_content = str(metadata.get("role_content", "")).strip() or None
         prompt = self.context.build_cli_turn_prompt(
             history=session.get_history(),
             current_message=msg.content,
             channel=origin_channel,
             chat_id=origin_chat_id,
             cwd=session_cwd,
+            role_content=role_content,
         )
 
         chunks: list[str] = []

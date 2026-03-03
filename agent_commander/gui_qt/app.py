@@ -18,15 +18,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from PySide6.QtCore import QTimer
+
 from agent_commander.gui_qt import theme
 from agent_commander.gui_qt.chat_panel import ChatPanel, ToolBubble
+from agent_commander.gui_qt.cycle_bar import CycleControlBar
 from agent_commander.gui_qt.extensions_panel import ExtensionsPanel
 from agent_commander.gui_qt.file_tray import FileTrayPanel
 from agent_commander.gui_qt.input_bar import InputBar
 from agent_commander.gui_qt.new_session_dialog import NewSessionDialog
 from agent_commander.gui_qt.session_list import SessionListWidget
 from agent_commander.gui_qt.settings_panel import SettingsPanel
+from agent_commander.gui_qt.team_panel import TeamPanel
 from agent_commander.session.gui_store import GUIStore, SessionMeta, StoredMessage
+from agent_commander.session.skill_store import SkillStore
 
 if TYPE_CHECKING:
     from agent_commander.session.extension_store import ExtensionStore
@@ -36,10 +41,12 @@ if TYPE_CHECKING:
 _PANEL_CHAT = 0
 _PANEL_EXTENSIONS = 1
 _PANEL_SETTINGS = 2
+_PANEL_TEAM = 3
 
 _MODE_TOGGLES = [
     (_PANEL_EXTENSIONS, "Extensions"),
     (_PANEL_SETTINGS, "Settings"),
+    (_PANEL_TEAM, "Team"),
 ]
 
 _WARN_THRESHOLD = 25.0
@@ -89,13 +96,29 @@ class QtApp(QMainWindow):
         self._session_agents: dict[str, str] = {}
         self._session_cwds: dict[str, str] = {}
         self._session_titles: dict[str, str] = {}
+        self._session_roles: dict[str, str] = {}
+        self._session_cycle_mode: dict[str, bool] = {}
         self._chat_panels: dict[str, ChatPanel] = {}
         self._pending_tools: dict[str, ToolBubble] = {}
         self._files_visible = True
         self._usage_snapshots: dict[str, "AgentUsageSnapshot"] = {}
         self._usage_label: QLabel | None = None
+        self._skill_store = SkillStore()
+
+        # Cycle mode state
+        self._cycle_running = False
+        self._cycle_session_id: str | None = None
+        self._cycle_task = ""
+        self._cycle_interval_s = 900
+        self._cycle_max_iter = 0       # 0 = infinite
+        self._cycle_iter_count = 0
+        self._cycle_queued = False     # a run is pending, waiting for agent to finish
+        self._agent_busy = False       # is agent currently processing a message?
+        self._cycle_timer = QTimer()
+        self._cycle_timer.setSingleShot(True)
 
         self._invoke.connect(lambda fn: fn())
+        self._cycle_timer.timeout.connect(self._on_cycle_tick)
 
         self.setWindowTitle("Agent Commander")
         icon_path = theme.find_icon()
@@ -176,10 +199,22 @@ class QtApp(QMainWindow):
             on_submit=self._on_input_submit,
         )
         ll.addWidget(self._input_bar)
+
+        # Cycle Mode settings bar (hidden by default)
+        self._cycle_bar = CycleControlBar()
+        self._cycle_bar.setVisible(False)
+        ll.addWidget(self._cycle_bar)
+
         sl.addWidget(left_col, stretch=1)
 
         # Right-side Agent Tab tray (visible by default)
-        self._file_tray = FileTrayPanel(on_cwd_change=self._on_cwd_change)
+        self._file_tray = FileTrayPanel(
+            on_cwd_change=self._on_cwd_change,
+            on_role_change=self._on_role_change,
+            on_cycle_mode_change=self._on_cycle_mode_toggled,
+            skill_store=self._skill_store,
+        )
+        self._file_tray.refresh_roles()
         self._file_tray.setFixedWidth(260)
         self._file_tray.setStyleSheet(
             f"background-color: {theme.BG_PANEL};"
@@ -202,6 +237,13 @@ class QtApp(QMainWindow):
         # ── Panel 2: Settings ───────────────────────────────────────────
         self._settings_panel = SettingsPanel(server_manager=self._server_manager)
         self._content_stack.addWidget(self._settings_panel)    # index 2
+
+        # ── Panel 3: Team (Skill Library) ────────────────────────────────
+        self._team_panel = TeamPanel(
+            skill_store=self._skill_store,
+            on_skill_changed=self._on_skill_changed,
+        )
+        self._content_stack.addWidget(self._team_panel)        # index 3
 
         self._set_active_panel(_PANEL_CHAT)
         root.addWidget(right, stretch=1)
@@ -298,6 +340,8 @@ class QtApp(QMainWindow):
             self._settings_panel.refresh()
         elif idx == _PANEL_EXTENSIONS:
             self._extensions_panel.refresh()
+        elif idx == _PANEL_TEAM:
+            self._team_panel.refresh()
         elif idx == _PANEL_CHAT and self._active_session_id:
             panel = self._chat_panels.get(self._active_session_id)
             if panel is not None:
@@ -338,6 +382,151 @@ class QtApp(QMainWindow):
             self._default_cwd = cwd
         self._input_bar.set_cwd(cwd)
         self._sync_file_tray()
+
+    def _on_role_change(self, skill_id: str) -> None:
+        sid = self._active_session_id
+        if sid:
+            self._session_roles[sid] = skill_id
+
+    def _on_skill_changed(self) -> None:
+        """Called after any Team panel create/update/delete — refreshes role combo."""
+        self._file_tray.refresh_roles()
+        # Restore active session's role after refresh
+        sid = self._active_session_id
+        if sid:
+            self._file_tray.set_role(self._session_roles.get(sid, ""))
+
+    def _restore_cycle_state_for_session(self, session_id: str) -> None:
+        """Sync cycle-mode UI to the state saved for session_id."""
+        active = self._session_cycle_mode.get(session_id, False)
+        running = self._cycle_running and self._cycle_session_id == session_id
+
+        self._file_tray.set_cycle_mode(active)
+        self._cycle_bar.setVisible(active)
+        self._input_bar.set_cycle_mode(
+            active,
+            on_cycle_click=self._on_cycle_btn_clicked if active else None,
+        )
+        self._input_bar.set_cycle_running(running)
+        if active:
+            # Lock/unlock fields; if not running, resets status to "Ready"
+            self._cycle_bar.set_running(running)
+
+    # ------------------------------------------------------------------
+    # Cycle Mode
+    # ------------------------------------------------------------------
+
+    def _on_cycle_mode_toggled(self, active: bool) -> None:
+        sid = self._active_session_id
+        if sid:
+            self._session_cycle_mode[sid] = active
+        if not active and self._cycle_running and self._cycle_session_id == sid:
+            self._stop_cycle()
+        self._cycle_bar.setVisible(active)
+        self._input_bar.set_cycle_mode(
+            active,
+            on_cycle_click=self._on_cycle_btn_clicked if active else None,
+        )
+
+    def _on_cycle_btn_clicked(self) -> None:
+        """InputBar Run/Stop button clicked in cycle mode."""
+        if self._cycle_running:
+            self._stop_cycle()
+        else:
+            self._on_cycle_run_requested()
+
+    def _on_cycle_run_requested(self) -> None:
+        task = self._input_bar.get_text()
+        if not task:
+            self._cycle_bar.set_status("Type a task above first")
+            return
+        session_id = self._active_session_id
+        if not session_id:
+            self._cycle_bar.set_status("No active session")
+            return
+        self._cycle_running = True
+        self._cycle_session_id = session_id
+        self._cycle_task = task
+        self._cycle_interval_s = self._cycle_bar.interval_seconds()
+        self._cycle_max_iter = self._cycle_bar.max_iterations()
+        self._cycle_iter_count = 0
+        self._cycle_queued = False
+        self._cycle_bar.set_running(True)
+        self._input_bar.set_cycle_running(True)
+        self._execute_cycle_iteration()
+
+    def _execute_cycle_iteration(self) -> None:
+        if not self._cycle_running:
+            return
+        if self._cycle_max_iter > 0 and self._cycle_iter_count >= self._cycle_max_iter:
+            self._stop_cycle(done=True)
+            return
+        self._cycle_iter_count += 1
+        total = f"/{self._cycle_max_iter}" if self._cycle_max_iter > 0 else ""
+        self._cycle_bar.set_status(f"Running ({self._cycle_iter_count}{total})")
+        self._input_bar.set_cycle_running(True)
+        self._dispatch_cycle_message()
+        # Schedule next tick
+        self._cycle_timer.start(self._cycle_interval_s * 1000)
+        self._cycle_bar.start_countdown(self._cycle_interval_s)
+
+    def _dispatch_cycle_message(self) -> None:
+        session_id = self._cycle_session_id
+        if not session_id:
+            return
+        panel = self._chat_panels.get(session_id)
+        if panel is None:
+            return
+        agent = self._session_agents.get(session_id, self._default_agent)
+        cwd = self._session_cwds.get(session_id) or None
+
+        panel.add_user_message(self._cycle_task)
+        ts = _now()
+        self._session_store.append_message(
+            session_id, StoredMessage(role="user", text=self._cycle_task, ts=ts)
+        )
+
+        metadata: dict | None = None
+        role_id = self._session_roles.get(session_id, "")
+        if role_id:
+            role_content = self._skill_store.get_content(role_id)
+            if role_content:
+                metadata = {"role_content": role_content}
+
+        self._agent_busy = True
+        if self._on_user_input:
+            self._on_user_input(session_id, self._cycle_task, agent, cwd, metadata)
+
+    def _on_cycle_tick(self) -> None:
+        """Single-shot timer fired — time for the next iteration."""
+        if not self._cycle_running:
+            return
+        if self._agent_busy:
+            # Agent still processing — queue one run for when it finishes
+            self._cycle_queued = True
+            self._cycle_bar.set_status("Queued (agent busy…)")
+        else:
+            self._execute_cycle_iteration()
+
+    def _stop_cycle(self, done: bool = False) -> None:
+        stopped_session = self._cycle_session_id
+        self._cycle_running = False
+        self._cycle_queued = False
+        self._cycle_timer.stop()
+
+        # Update UI only if the user is currently viewing the session that had the cycle
+        if self._active_session_id == stopped_session:
+            self._cycle_bar.set_running(False)
+            self._input_bar.set_cycle_running(False)
+            if done:
+                self._cycle_bar.set_status(
+                    f"Done ({self._cycle_iter_count}/{self._cycle_max_iter})"
+                )
+            else:
+                self._cycle_bar.set_status("Stopped")
+            self._file_tray.set_cycle_mode(
+                self._session_cycle_mode.get(stopped_session or "", False)
+            )
 
     def _refresh_chat_title(self) -> None:
         label = getattr(self, "_chat_title_label", None)
@@ -403,10 +592,12 @@ class QtApp(QMainWindow):
         panel.refresh_layout()
         self._session_list.set_active(session_id)
         self._refresh_chat_title()
-        # Restore saved CWD for this session
+        # Restore saved CWD, role, and cycle mode for this session
         saved_cwd = self._session_cwds.get(session_id, self._default_cwd)
         self._input_bar.set_cwd(saved_cwd)
         self._sync_file_tray()
+        self._file_tray.set_role(self._session_roles.get(session_id, ""))
+        self._restore_cycle_state_for_session(session_id)
 
     def _on_delete_session(self, session_id: str) -> None:
         self._session_store.delete_session(session_id)
@@ -419,7 +610,12 @@ class QtApp(QMainWindow):
         self._session_agents.pop(session_id, None)
         self._session_cwds.pop(session_id, None)
         self._session_titles.pop(session_id, None)
+        self._session_roles.pop(session_id, None)
+        self._session_cycle_mode.pop(session_id, None)
         self._pending_tools.pop(session_id, None)
+        # Stop cycle if it was running on the deleted session
+        if self._cycle_session_id == session_id and self._cycle_running:
+            self._stop_cycle()
         self._session_list.remove_session(session_id)
 
         if self._active_session_id == session_id:
@@ -459,8 +655,16 @@ class QtApp(QMainWindow):
                 self._session_store.upsert_meta(meta)
                 break
 
+        metadata: dict | None = None
+        role_id = self._session_roles.get(session_id, "")
+        if role_id:
+            role_content = self._skill_store.get_content(role_id)
+            if role_content:
+                metadata = {"role_content": role_content}
+
+        self._agent_busy = True
         if self._on_user_input:
-            self._on_user_input(session_id, text, agent, cwd, None)
+            self._on_user_input(session_id, text, agent, cwd, metadata)
 
         self.statusBar().showMessage(f"Sent to {agent}…", 4000)
 
@@ -562,6 +766,16 @@ class QtApp(QMainWindow):
                     StoredMessage(role="assistant", text=full_text, ts=_now()),
                 )
             self.statusBar().showMessage("Ready", 0)
+            self._agent_busy = False
+            # If a cycle iteration was queued while agent was busy, run it now
+            if (
+                self._cycle_running
+                and self._cycle_queued
+                and session_id == self._cycle_session_id
+            ):
+                self._cycle_queued = False
+                self._cycle_timer.stop()
+                self._execute_cycle_iteration()
 
     def receive_tool_start(self, session_id: str, name: str, args: str) -> None:
         panel = self._chat_panels.get(session_id)

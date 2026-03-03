@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -19,6 +20,9 @@ from PySide6.QtWidgets import (
 
 from agent_commander.gui_qt import theme
 
+if TYPE_CHECKING:
+    from agent_commander.session.skill_store import SkillStore
+
 _MAX_ENTRIES = 200
 
 
@@ -28,12 +32,20 @@ class FileTrayPanel(QWidget):
     def __init__(
         self,
         on_cwd_change: Callable[[str], None] | None = None,
+        on_role_change: Callable[[str], None] | None = None,
+        on_cycle_mode_change: Callable[[bool], None] | None = None,
+        skill_store: "SkillStore | None" = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._on_cwd_change = on_cwd_change
+        self._on_role_change = on_role_change
+        self._on_cycle_mode_change = on_cycle_mode_change
+        self._skill_store = skill_store
         self._workdir = ""
         self._expanded: set[Path] = set()
+        # skill_id → combo index mapping (rebuilt in refresh_roles)
+        self._role_ids: list[str] = []
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -54,6 +66,45 @@ class FileTrayPanel(QWidget):
 
     def set_on_cwd_change(self, callback: Callable[[str], None] | None) -> None:
         self._on_cwd_change = callback
+
+    def current_role_id(self) -> str:
+        """Return the currently selected skill_id, or '' if none."""
+        idx = self._role_combo.currentIndex()
+        if idx <= 0:
+            return ""
+        return self._role_ids[idx - 1] if idx - 1 < len(self._role_ids) else ""
+
+    def set_role(self, skill_id: str) -> None:
+        """Select a role by skill_id without emitting on_role_change."""
+        if skill_id == "":
+            self._role_combo.blockSignals(True)
+            self._role_combo.setCurrentIndex(0)
+            self._role_combo.blockSignals(False)
+            return
+        try:
+            combo_idx = self._role_ids.index(skill_id) + 1
+        except ValueError:
+            combo_idx = 0
+        self._role_combo.blockSignals(True)
+        self._role_combo.setCurrentIndex(combo_idx)
+        self._role_combo.blockSignals(False)
+
+    def refresh_roles(self) -> None:
+        """Reload skill list into the role combo (preserves current selection)."""
+        current_id = self.current_role_id()
+        self._role_combo.blockSignals(True)
+        self._role_combo.clear()
+        self._role_ids = []
+        self._role_combo.addItem("— None —")
+        if self._skill_store is not None:
+            for skill in self._skill_store.list_skills():
+                label = skill.name
+                if skill.category:
+                    label = f"{skill.name}  [{skill.category}]"
+                self._role_combo.addItem(label)
+                self._role_ids.append(skill.id)
+        self._role_combo.blockSignals(False)
+        self.set_role(current_id)
 
     # ------------------------------------------------------------------
     # Build
@@ -89,6 +140,67 @@ class FileTrayPanel(QWidget):
             f"color: {theme.TEXT_MUTED}; font-size: 10px; background: transparent;"
         )
         sl.addWidget(settings_hint)
+
+        # Role selector
+        role_block = QWidget()
+        role_block.setStyleSheet(f"background: {theme.BG_INPUT}; border: none;")
+        rb = QVBoxLayout(role_block)
+        rb.setContentsMargins(8, 6, 8, 6)
+        rb.setSpacing(4)
+
+        role_head = QWidget()
+        role_head.setStyleSheet("background: transparent;")
+        rh = QHBoxLayout(role_head)
+        rh.setContentsMargins(0, 0, 0, 0)
+        rh.setSpacing(0)
+
+        role_title = QLabel("Role")
+        role_title.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+        rh.addWidget(role_title)
+        rb.addWidget(role_head)
+
+        self._role_combo = QComboBox()
+        self._role_combo.setFixedHeight(28)
+        self._role_combo.setStyleSheet(
+            f"QComboBox {{ background: {theme.BG_PANEL}; color: {theme.TEXT};"
+            f" border: 1px solid {theme.BORDER}; border-radius: 6px;"
+            " font-size: 11px; padding: 2px 8px; }"
+            f"QComboBox::drop-down {{ border: none; width: 18px; }}"
+            f"QComboBox QAbstractItemView {{ background: {theme.BG_PANEL};"
+            f" color: {theme.TEXT}; border: 1px solid {theme.BORDER};"
+            f" selection-background-color: {theme.SESSION_ACTIVE_BG}; }}"
+        )
+        self._role_combo.addItem("— None —")
+        self._role_ids = []
+        self._role_combo.currentIndexChanged.connect(self._on_role_selected)
+        rb.addWidget(self._role_combo)
+        sl.addWidget(role_block)
+
+        # Cycle Mode toggle
+        cycle_block = QWidget()
+        cycle_block.setStyleSheet("background: transparent;")
+        cyb = QVBoxLayout(cycle_block)
+        cyb.setContentsMargins(0, 6, 0, 0)
+        cyb.setSpacing(4)
+
+        cycle_label = QLabel("Modes")
+        cycle_label.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 10px; background: transparent;"
+        )
+        cyb.addWidget(cycle_label)
+
+        self._cycle_btn = QPushButton("⟳  Cycle Mode")
+        self._cycle_btn.setFixedHeight(30)
+        self._cycle_btn.setCheckable(True)
+        self._cycle_btn.setChecked(False)
+        self._cycle_btn.setStyleSheet(self._mode_btn_style(active=False))
+        self._cycle_btn.clicked.connect(self._on_cycle_toggled)
+        cyb.addWidget(self._cycle_btn)
+
+        sl.addWidget(cycle_block)
+
         sl.addStretch()
 
         cwd_block = QWidget()
@@ -235,6 +347,35 @@ class FileTrayPanel(QWidget):
 
         if counter[0] == 0:
             self._show_info("Empty folder.")
+
+    def set_cycle_mode(self, active: bool) -> None:
+        """Update cycle button state without emitting callback."""
+        self._cycle_btn.blockSignals(True)
+        self._cycle_btn.setChecked(active)
+        self._cycle_btn.setStyleSheet(self._mode_btn_style(active=active))
+        self._cycle_btn.blockSignals(False)
+
+    def _on_cycle_toggled(self, checked: bool) -> None:
+        self._cycle_btn.setStyleSheet(self._mode_btn_style(active=checked))
+        if self._on_cycle_mode_change:
+            self._on_cycle_mode_change(checked)
+
+    @staticmethod
+    def _mode_btn_style(active: bool) -> str:
+        bg = theme.SESSION_ACTIVE_BG if active else theme.BG_PANEL
+        color = theme.ACCENT if active else theme.TEXT_MUTED
+        border = theme.ACCENT if active else theme.BORDER
+        return (
+            f"QPushButton {{ background: {bg}; color: {color};"
+            f" border: 1px solid {border}; border-radius: 6px;"
+            " font-size: 11px; font-weight: bold; padding: 0 10px; }"
+            f"QPushButton:hover {{ color: {theme.TEXT}; border-color: {theme.TEXT_MUTED}; }}"
+        )
+
+    def _on_role_selected(self, idx: int) -> None:
+        skill_id = self._role_ids[idx - 1] if idx > 0 and idx - 1 < len(self._role_ids) else ""
+        if self._on_role_change:
+            self._on_role_change(skill_id)
 
     def _browse_workdir(self) -> None:
         start = self._workdir or str(Path.home())

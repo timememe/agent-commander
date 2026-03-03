@@ -77,12 +77,14 @@ Skills with available="false" need dependencies installed first - you can try in
         chat_id: str | None = None,
         cwd: str | None = None,
         max_history_messages: int = 30,
+        role_content: str | None = None,
     ) -> str:
         """
         Build a plain-text prompt for CLI-agent pass-through mode.
 
         The prompt carries:
         - system context (bootstrap/memory/skills)
+        - optional active role (injected from session skill)
         - compact recent chat history
         - current user message
         """
@@ -90,6 +92,9 @@ Skills with available="false" need dependencies installed first - you can try in
 
         system_prompt = self.build_system_prompt(skill_names)
         sections.append(f"# System Context\n{system_prompt}")
+
+        if role_content:
+            sections.append(f"# Active Role\n\n{role_content}")
 
         session_rows: list[str] = []
         if channel and chat_id:
