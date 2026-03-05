@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import email
 import email.header
 import email.mime.multipart
@@ -15,13 +16,16 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from agent_commander.session.extension_store import ExtensionStore
 
+_YANDEX_SETTINGS = {
+    "imap_host": "imap.yandex.ru",
+    "imap_port": 993,
+    "smtp_host": "smtp.yandex.ru",
+    "smtp_port": 465,
+}
+
 _PROVIDER_SETTINGS: dict[str, dict] = {
-    "yandex_mail": {
-        "imap_host": "imap.yandex.ru",
-        "imap_port": 993,
-        "smtp_host": "smtp.yandex.ru",
-        "smtp_port": 465,
-    },
+    "yandex_mail": _YANDEX_SETTINGS,
+    "yandex": _YANDEX_SETTINGS,       # alias for new provider id
     "google": {
         "imap_host": "imap.gmail.com",
         "imap_port": 993,
@@ -129,12 +133,19 @@ EMAIL_TOOL_DEFINITIONS: list[dict] = [
 # ── Credential / settings helpers ─────────────────────────────────────────────
 
 
-def _find_email_extension(extension_store: "ExtensionStore") -> tuple[dict, dict] | None:
-    """Return (credentials, provider_settings) for first connected email extension.
+def _find_email_extension(
+    extension_store: "ExtensionStore",
+    active_ids: list[str] | None = None,
+) -> tuple[dict, dict, str] | None:
+    """Return (credentials, provider_settings, provider) for a connected email extension.
 
-    Returns None if no connected email extension is found.
+    If active_ids is provided, only extensions in that list are considered.
+    Returns None if no matching connected email extension is found.
     """
-    for ext in extension_store.list_extensions():
+    exts = extension_store.list_extensions()
+    if active_ids:
+        exts = [e for e in exts if e.id in active_ids]
+    for ext in exts:
         if ext.status != "connected":
             continue
         settings = _PROVIDER_SETTINGS.get(ext.provider)
@@ -143,18 +154,27 @@ def _find_email_extension(extension_store: "ExtensionStore") -> tuple[dict, dict
         creds = ext.credentials
         if not creds.get("email") or not creds.get("token"):
             continue
-        return creds, settings
+        return creds, settings, ext.provider
     return None
 
 
 # ── IMAP helpers ───────────────────────────────────────────────────────────────
 
 
-def _imap_connect(creds: dict, settings: dict) -> imaplib.IMAP4_SSL:
-    """Open an authenticated IMAP4_SSL connection."""
+def _imap_connect(creds: dict, settings: dict, provider: str = "") -> imaplib.IMAP4_SSL:
+    """Open an authenticated IMAP4_SSL connection.
+
+    Google requires XOAUTH2 (OAuth bearer token); Yandex uses plain login.
+    """
     ctx = ssl.create_default_context()
     client = imaplib.IMAP4_SSL(settings["imap_host"], settings["imap_port"], ssl_context=ctx)
-    client.login(creds["email"], creds["token"])
+    if provider == "google":
+        # Gmail IMAP requires SASL XOAUTH2 when using OAuth tokens.
+        # imaplib.authenticate will base64-encode the returned bytes.
+        auth_string = f"user={creds['email']}\x01auth=Bearer {creds['token']}\x01\x01"
+        client.authenticate("XOAUTH2", lambda _challenge: auth_string.encode())
+    else:
+        client.login(creds["email"], creds["token"])
     return client
 
 
@@ -241,12 +261,12 @@ def _fetch_messages(client: imaplib.IMAP4_SSL, criteria: str, limit: int) -> lis
 # ── Tool implementations ───────────────────────────────────────────────────────
 
 
-def _tool_list_emails(creds: dict, settings: dict, folder: str, limit: int, only_unread: bool) -> str:
+def _tool_list_emails(creds: dict, settings: dict, provider: str, folder: str, limit: int, only_unread: bool) -> str:
     folder = folder or "INBOX"
     limit = max(1, min(limit or 10, 50))
     criteria = "UNSEEN" if only_unread else "ALL"
 
-    client = _imap_connect(creds, settings)
+    client = _imap_connect(creds, settings, provider)
     try:
         client.select(folder, readonly=True)
         messages = _fetch_messages(client, criteria, limit)
@@ -269,10 +289,10 @@ def _tool_list_emails(creds: dict, settings: dict, folder: str, limit: int, only
     return "\n".join(lines).rstrip()
 
 
-def _tool_get_email(creds: dict, settings: dict, uid: str, folder: str) -> str:
+def _tool_get_email(creds: dict, settings: dict, provider: str, uid: str, folder: str) -> str:
     folder = folder or "INBOX"
 
-    client = _imap_connect(creds, settings)
+    client = _imap_connect(creds, settings, provider)
     try:
         client.select(folder, readonly=True)
         _s, raw = client.uid("fetch", uid.encode(), "(RFC822)")  # type: ignore[arg-type]
@@ -302,9 +322,9 @@ def _tool_get_email(creds: dict, settings: dict, uid: str, folder: str) -> str:
     return result
 
 
-def _tool_send_email(creds: dict, settings: dict, to: str, subject: str, body: str) -> str:
+def _tool_send_email(creds: dict, settings: dict, provider: str, to: str, subject: str, body: str) -> str:
     sender = creds["email"]
-    password = creds["token"]
+    token = creds["token"]
 
     mime_msg = email.mime.multipart.MIMEMultipart()
     mime_msg["From"] = sender
@@ -314,13 +334,22 @@ def _tool_send_email(creds: dict, settings: dict, to: str, subject: str, body: s
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(settings["smtp_host"], settings["smtp_port"], context=ctx) as smtp:
-        smtp.login(sender, password)
+        smtp.ehlo()
+        if provider == "google":
+            # Gmail SMTP requires SASL XOAUTH2 when using OAuth bearer tokens.
+            auth_string = f"user={sender}\x01auth=Bearer {token}\x01\x01"
+            auth_b64 = base64.b64encode(auth_string.encode()).decode()
+            code, resp = smtp.docmd("AUTH", "XOAUTH2 " + auth_b64)
+            if code != 235:
+                raise smtplib.SMTPAuthenticationError(code, resp)
+        else:
+            smtp.login(sender, token)
         smtp.sendmail(sender, [to], mime_msg.as_string())
 
     return f"Email sent successfully to {to} with subject '{subject}'."
 
 
-def _tool_search_emails(creds: dict, settings: dict, query: str, limit: int) -> str:
+def _tool_search_emails(creds: dict, settings: dict, provider: str, query: str, limit: int) -> str:
     limit = max(1, min(limit or 10, 50))
 
     # IMAP SEARCH: OR FROM <query> SUBJECT <query>
@@ -328,7 +357,7 @@ def _tool_search_emails(creds: dict, settings: dict, query: str, limit: int) -> 
     safe_query = query.replace('"', "").replace("\\", "")
     criteria = f'OR FROM "{safe_query}" SUBJECT "{safe_query}"'
 
-    client = _imap_connect(creds, settings)
+    client = _imap_connect(creds, settings, provider)
     try:
         client.select("INBOX", readonly=True)
         messages = _fetch_messages(client, criteria, limit)
@@ -358,23 +387,25 @@ def execute_email_tool(
     name: str,
     args: dict,
     extension_store: "ExtensionStore",
+    active_ids: list[str] | None = None,
 ) -> str:
     """Dispatch an email_* tool call.
 
-    Finds the first connected email extension, derives IMAP/SMTP settings,
-    and calls the appropriate implementation.
+    If active_ids is provided, only extensions in that list are considered,
+    ensuring the correct account is used based on the user's Agent Tab selection.
     """
-    found = _find_email_extension(extension_store)
+    found = _find_email_extension(extension_store, active_ids)
     if found is None:
         return "Error: no connected email extension found. Connect an email account in Extensions settings."
 
-    creds, settings = found
+    creds, settings, provider = found
 
     try:
         if name == "email_list_emails":
             return _tool_list_emails(
                 creds=creds,
                 settings=settings,
+                provider=provider,
                 folder=args.get("folder", "INBOX"),
                 limit=args.get("limit", 10),
                 only_unread=bool(args.get("only_unread", False)),
@@ -386,6 +417,7 @@ def execute_email_tool(
             return _tool_get_email(
                 creds=creds,
                 settings=settings,
+                provider=provider,
                 uid=uid,
                 folder=args.get("folder", "INBOX"),
             )
@@ -399,7 +431,10 @@ def execute_email_tool(
                 return "Error: subject is required"
             if not body:
                 return "Error: body is required"
-            return _tool_send_email(creds=creds, settings=settings, to=to, subject=subject, body=body)
+            return _tool_send_email(
+                creds=creds, settings=settings, provider=provider,
+                to=to, subject=subject, body=body,
+            )
         elif name == "email_search_emails":
             query = str(args.get("query", "")).strip()
             if not query:
@@ -407,6 +442,7 @@ def execute_email_tool(
             return _tool_search_emails(
                 creds=creds,
                 settings=settings,
+                provider=provider,
                 query=query,
                 limit=args.get("limit", 10),
             )

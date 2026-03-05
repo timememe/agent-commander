@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agent_commander.session.extension_store import ExtensionStore
+    from agent_commander.session.skill_store import SkillStore
+    from agent_commander.session.project_store import ProjectStore
 
 
 @dataclass
@@ -29,6 +31,7 @@ class ProxySession:
 
     agent_key: str
     cwd: str | None = None
+    active_extension_ids: list[str] = field(default_factory=list)
 
     @property
     def agent(self) -> "_ProxyAgent":
@@ -88,6 +91,8 @@ class ProxyAPIProvider:
         request_timeout_s: float = 300.0,
         endpoint: str = "/v1/chat/completions",
         extension_store: "ExtensionStore | None" = None,
+        skill_store: "SkillStore | None" = None,
+        project_store: "ProjectStore | None" = None,
     ) -> None:
         self.base_url = (base_url or "http://127.0.0.1:8317").rstrip("/")
         self.api_key = (api_key or "").strip()
@@ -99,6 +104,8 @@ class ProxyAPIProvider:
             "codex": model_codex.strip(),
         }
         self._extension_store = extension_store
+        self._skill_store = skill_store
+        self._project_store = project_store
 
     # ── Public async interface ────────────────────────────────────────
 
@@ -175,16 +182,23 @@ class ProxyAPIProvider:
         event_q: _EventQueue,
     ) -> None:
         """Multi-round agent loop: send request, execute tool calls, repeat."""
-        from agent_commander.providers.tools.definitions import TOOL_DEFINITIONS, execute_tool
+        from agent_commander.providers.tools.definitions import (
+            TOOL_DEFINITIONS, TEAM_PROJECT_TOOL_DEFINITIONS, execute_tool,
+        )
 
         model = self._select_model(session)
         messages: list[dict] = [{"role": "user", "content": message}]
+
+        # Include team/project tools only when stores are wired in
+        active_tools = list(TOOL_DEFINITIONS)
+        if self._skill_store is not None or self._project_store is not None:
+            active_tools = active_tools + TEAM_PROJECT_TOOL_DEFINITIONS
 
         for round_num in range(_MAX_TOOL_ROUNDS):
             result = self._single_request(
                 model=model,
                 messages=messages,
-                tools=TOOL_DEFINITIONS,
+                tools=active_tools,
                 event_q=event_q,
             )
 
@@ -207,6 +221,9 @@ class ProxyAPIProvider:
                     arguments_json=tc.arguments,
                     cwd=session.cwd,
                     extension_store=self._extension_store,
+                    active_extension_ids=session.active_extension_ids or None,
+                    skill_store=self._skill_store,
+                    project_store=self._project_store,
                 )
 
                 event_q.put(("tool_end", {"id": tc.id, "name": tc.name, "result": tool_result}))

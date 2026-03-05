@@ -15,6 +15,88 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _build_extension_section(ext: "ExtensionDef") -> str:
+    """Build a rich context block for one extension, including credentials and usage templates."""
+    email = ext.credentials.get("email", "")
+    token = ext.credentials.get("token", "")
+    provider = ext.provider
+
+    if provider == "google":
+        refresh_token = ext.credentials.get("refresh_token", "")
+        client_id = ext.credentials.get("client_id", "")
+        client_secret = ext.credentials.get("client_secret", "")
+        if refresh_token:
+            creds_init = (
+                f'creds = Credentials(\n'
+                f'    token="{token}",\n'
+                f'    refresh_token="{refresh_token}",\n'
+                f'    token_uri="https://oauth2.googleapis.com/token",\n'
+                f'    client_id="{client_id}",\n'
+                f'    client_secret="{client_secret}",\n'
+                f')'
+            )
+        else:
+            creds_init = f'creds = Credentials(token="{token}")'
+
+        return (
+            f"### Google — {email}\n\n"
+            f"**Active services:** Gmail, Google Drive, Google Calendar\n"
+            f"**Account:** {email}\n\n"
+            f"Use this for all Google API calls"
+            f" (install if needed: `pip install google-api-python-client google-auth`):\n"
+            f"```python\n"
+            f"from google.oauth2.credentials import Credentials\n"
+            f"from google.auth.transport.requests import Request\n"
+            f"from googleapiclient.discovery import build\n\n"
+            f"{creds_init}\n"
+            f"if creds.expired and creds.refresh_token:\n"
+            f"    creds.refresh(Request())\n\n"
+            f"# Send email via Gmail:\n"
+            f"gmail = build('gmail', 'v1', credentials=creds)\n\n"
+            f"# Create/list calendar events:\n"
+            f"cal = build('calendar', 'v3', credentials=creds)\n\n"
+            f"# Access Drive files:\n"
+            f"drive = build('drive', 'v3', credentials=creds)\n"
+            f"```"
+        )
+
+    if provider in ("yandex", "yandex_mail"):
+        app_password = ext.credentials.get("token", "")
+        return (
+            f"### Яндекс — {email}\n\n"
+            f"**Active services:** Яндекс Почта (IMAP/SMTP), Яндекс Диск (WebDAV)\n"
+            f"**Account:** {email}\n"
+            f"**App Password:** {app_password}\n\n"
+            f"Use these credentials for all Yandex services:\n"
+            f"```python\n"
+            f"# Send email via SMTP:\n"
+            f"import smtplib\n"
+            f"from email.mime.text import MIMEText\n"
+            f"from email.mime.multipart import MIMEMultipart\n\n"
+            f"smtp = smtplib.SMTP_SSL('smtp.yandex.ru', 465)\n"
+            f"smtp.login('{email}', '{app_password}')\n"
+            f"msg = MIMEMultipart()\n"
+            f"msg['From'] = '{email}'\n"
+            f"msg['To'] = recipient\n"
+            f"msg['Subject'] = subject\n"
+            f"msg.attach(MIMEText(body, 'plain', 'utf-8'))\n"
+            f"smtp.sendmail('{email}', [recipient], msg.as_string())\n"
+            f"smtp.quit()\n\n"
+            f"# Yandex Disk (WebDAV):\n"
+            f"import requests\n"
+            f"r = requests.request('PROPFIND', 'https://webdav.yandex.ru/',\n"
+            f"    auth=('{email}', '{app_password}'))\n"
+            f"```"
+        )
+
+    # Generic fallback
+    services: list[str] = ext.credentials.get("services", [])
+    services_str = ", ".join(services) if services else ext.name
+    if email:
+        return f"### {ext.name} — {email}\n\n**Active services:** {services_str}"
+    return f"### {ext.name}\n\n**Active services:** {services_str}"
+
+
 @dataclass
 class ExtensionDef:
     """Metadata and credentials for one external integration."""
@@ -85,21 +167,65 @@ class ExtensionStore:
             shutil.rmtree(ext_dir)
 
     def build_context(self, active_ids: list[str]) -> str:
-        """Build context string for connected active extensions (no credentials)."""
+        """Build context string with credentials and code templates for active extensions."""
         parts: list[str] = []
         for ext_id in active_ids:
             ext = self.get_extension(ext_id)
             if ext is None or ext.status != "connected":
                 continue
-            email = ext.credentials.get("email", "")
-            if email:
-                parts.append(
-                    f"### {ext.name}\n\n"
-                    f"You have access to {ext.name} for account {email}."
-                )
-            else:
-                parts.append(f"### {ext.name}\n\nYou have access to {ext.name}.")
-        return "\n\n".join(parts)
+            if ext.provider == "google":
+                ext = self._maybe_refresh_google_token(ext)
+            section = _build_extension_section(ext)
+            if section:
+                parts.append(section)
+        if not parts:
+            return ""
+        header = (
+            "The following external accounts are active for this session. "
+            "Use ONLY these accounts — do not use other email addresses, "
+            "calendars, or storage services.\n\n"
+        )
+        return header + "\n\n".join(parts)
+
+    def _maybe_refresh_google_token(self, ext: "ExtensionDef") -> "ExtensionDef":
+        """Refresh Google OAuth token if expired; saves updated credentials."""
+        try:
+            from datetime import datetime, timezone
+            from google.oauth2.credentials import Credentials  # type: ignore
+            from google.auth.transport.requests import Request  # type: ignore
+
+            refresh_token = ext.credentials.get("refresh_token", "")
+            if not refresh_token:
+                return ext  # no refresh token → nothing to refresh
+
+            expiry_str = ext.credentials.get("token_expiry", "")
+            expiry = None
+            if expiry_str:
+                try:
+                    expiry = datetime.fromisoformat(expiry_str)
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                except Exception:
+                    pass
+
+            creds = Credentials(
+                token=ext.credentials.get("token", ""),
+                refresh_token=refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=ext.credentials.get("client_id", ""),
+                client_secret=ext.credentials.get("client_secret", ""),
+                expiry=expiry,
+            )
+
+            if creds.expired or not creds.token:
+                creds.refresh(Request())
+                ext.credentials["token"] = creds.token or ""
+                if creds.expiry:
+                    ext.credentials["token_expiry"] = creds.expiry.isoformat()
+                self.upsert_extension(ext)
+        except Exception:
+            pass
+        return ext
 
     # ------------------------------------------------------------------ #
     # Private                                                               #

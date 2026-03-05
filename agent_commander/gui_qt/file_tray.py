@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -21,6 +24,8 @@ from PySide6.QtWidgets import (
 from agent_commander.gui_qt import theme
 
 if TYPE_CHECKING:
+    from agent_commander.session.extension_store import ExtensionStore
+    from agent_commander.session.project_store import ProjectStore
     from agent_commander.session.skill_store import SkillStore
 
 _MAX_ENTRIES = 200
@@ -34,18 +39,31 @@ class FileTrayPanel(QWidget):
         on_cwd_change: Callable[[str], None] | None = None,
         on_role_change: Callable[[str], None] | None = None,
         on_cycle_mode_change: Callable[[bool], None] | None = None,
+        on_extensions_change: Callable[[list[str]], None] | None = None,
+        on_project_change: Callable[[str], None] | None = None,
         skill_store: "SkillStore | None" = None,
+        extension_store: "ExtensionStore | None" = None,
+        project_store: "ProjectStore | None" = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._on_cwd_change = on_cwd_change
         self._on_role_change = on_role_change
         self._on_cycle_mode_change = on_cycle_mode_change
+        self._on_extensions_change = on_extensions_change
+        self._on_project_change = on_project_change
         self._skill_store = skill_store
+        self._extension_store = extension_store
+        self._project_store = project_store
         self._workdir = ""
         self._expanded: set[Path] = set()
         # skill_id → combo index mapping (rebuilt in refresh_roles)
         self._role_ids: list[str] = []
+        # project_id → combo index mapping (rebuilt in refresh_projects)
+        self._project_ids: list[str] = []
+        # extension multi-select state
+        self._active_extension_ids: set[str] = set()
+        self._ext_check_widgets: list[tuple[str, QCheckBox]] = []
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -105,6 +123,107 @@ class FileTrayPanel(QWidget):
                 self._role_ids.append(skill.id)
         self._role_combo.blockSignals(False)
         self.set_role(current_id)
+
+    def current_project_id(self) -> str:
+        """Return the currently selected project_id, or ''."""
+        idx = self._project_combo.currentIndex()
+        if idx <= 0:
+            return ""
+        return self._project_ids[idx - 1] if idx - 1 < len(self._project_ids) else ""
+
+    def set_project(self, project_id: str) -> None:
+        """Select a project by project_id without emitting on_project_change."""
+        if project_id == "":
+            self._project_combo.blockSignals(True)
+            self._project_combo.setCurrentIndex(0)
+            self._project_combo.blockSignals(False)
+            return
+        try:
+            combo_idx = self._project_ids.index(project_id) + 1
+        except ValueError:
+            combo_idx = 0
+        self._project_combo.blockSignals(True)
+        self._project_combo.setCurrentIndex(combo_idx)
+        self._project_combo.blockSignals(False)
+
+    def refresh_projects(self) -> None:
+        """Reload project list into the project combo (preserves current selection)."""
+        current_id = self.current_project_id()
+        self._project_combo.blockSignals(True)
+        self._project_combo.clear()
+        self._project_ids = []
+        self._project_combo.addItem("— None —")
+        if self._project_store is not None:
+            for project in self._project_store.list_projects():
+                done = sum(1 for item in project.checklist if item.get("done"))
+                total = len(project.checklist)
+                label = project.name
+                if total > 0:
+                    label = f"{project.name}  [{done}/{total}]"
+                self._project_combo.addItem(label)
+                self._project_ids.append(project.project_id)
+        self._project_combo.blockSignals(False)
+        self.set_project(current_id)
+
+    def current_extension_ids(self) -> list[str]:
+        """Return currently selected extension IDs."""
+        return list(self._active_extension_ids)
+
+    def set_extensions(self, active_ids: list[str]) -> None:
+        """Restore extension selection for a session without emitting callback."""
+        self._active_extension_ids = set(active_ids)
+        for ext_id, cb in self._ext_check_widgets:
+            cb.blockSignals(True)
+            cb.setChecked(ext_id in self._active_extension_ids)
+            cb.blockSignals(False)
+
+    def refresh_extensions(self) -> None:
+        """Reload extension list from store (preserves currently selected IDs)."""
+        # Clear existing checkboxes
+        while self._ext_list_layout.count():
+            item = self._ext_list_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self._ext_check_widgets.clear()
+
+        exts = []
+        if self._extension_store is not None:
+            exts = [
+                e for e in self._extension_store.list_extensions()
+                if e.status == "connected"
+            ]
+
+        # Drop IDs that are no longer connected
+        connected_ids = {e.id for e in exts}
+        self._active_extension_ids &= connected_ids
+
+        if not exts:
+            empty_lbl = QLabel("No connected extensions")
+            empty_lbl.setStyleSheet(
+                f"color: {theme.TEXT_MUTED}; font-size: 10px; background: transparent;"
+            )
+            self._ext_list_layout.addWidget(empty_lbl)
+            return
+
+        for ext in exts:
+            cb = QCheckBox(ext.name)
+            cb.setChecked(ext.id in self._active_extension_ids)
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: {theme.TEXT}; font-size: 11px; background: transparent; }}"
+                f"QCheckBox::indicator {{ width: 13px; height: 13px; }}"
+                f"QCheckBox::indicator:unchecked {{"
+                f"  border: 1px solid {theme.BORDER}; border-radius: 3px;"
+                f"  background: {theme.BG_APP}; }}"
+                f"QCheckBox::indicator:checked {{"
+                f"  border: 1px solid {theme.ACCENT}; border-radius: 3px;"
+                f"  background: {theme.ACCENT}; }}"
+            )
+            cb.toggled.connect(
+                lambda checked, eid=ext.id: self._on_ext_toggled(eid, checked)
+            )
+            self._ext_list_layout.addWidget(cb)
+            self._ext_check_widgets.append((ext.id, cb))
 
     # ------------------------------------------------------------------
     # Build
@@ -178,6 +297,58 @@ class FileTrayPanel(QWidget):
         rb.addWidget(self._role_combo)
         sl.addWidget(role_block)
 
+        # Project selector
+        project_block = QWidget()
+        project_block.setStyleSheet(f"background: {theme.BG_INPUT}; border: none;")
+        pb = QVBoxLayout(project_block)
+        pb.setContentsMargins(8, 6, 8, 6)
+        pb.setSpacing(4)
+
+        project_title = QLabel("Project")
+        project_title.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+        pb.addWidget(project_title)
+
+        self._project_combo = QComboBox()
+        self._project_combo.setFixedHeight(28)
+        self._project_combo.setStyleSheet(
+            f"QComboBox {{ background: {theme.BG_PANEL}; color: {theme.TEXT};"
+            f" border: 1px solid {theme.BORDER}; border-radius: 6px;"
+            " font-size: 11px; padding: 2px 8px; }}"
+            f"QComboBox::drop-down {{ border: none; width: 18px; }}"
+            f"QComboBox QAbstractItemView {{ background: {theme.BG_PANEL};"
+            f" color: {theme.TEXT}; border: 1px solid {theme.BORDER};"
+            f" selection-background-color: {theme.SESSION_ACTIVE_BG}; }}"
+        )
+        self._project_combo.addItem("— None —")
+        self._project_ids = []
+        self._project_combo.currentIndexChanged.connect(self._on_project_selected)
+        pb.addWidget(self._project_combo)
+        sl.addWidget(project_block)
+
+        # Extensions multi-select block
+        ext_block = QWidget()
+        ext_block.setStyleSheet(f"background: {theme.BG_INPUT}; border: none;")
+        exb = QVBoxLayout(ext_block)
+        exb.setContentsMargins(8, 6, 8, 6)
+        exb.setSpacing(4)
+
+        ext_title = QLabel("Extensions")
+        ext_title.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+        exb.addWidget(ext_title)
+
+        # Dynamic checkbox container — rebuilt in refresh_extensions()
+        self._ext_list_container = QWidget()
+        self._ext_list_container.setStyleSheet("background: transparent;")
+        self._ext_list_layout = QVBoxLayout(self._ext_list_container)
+        self._ext_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._ext_list_layout.setSpacing(2)
+        exb.addWidget(self._ext_list_container)
+        sl.addWidget(ext_block)
+
         # Cycle Mode toggle
         cycle_block = QWidget()
         cycle_block.setStyleSheet("background: transparent;")
@@ -235,6 +406,17 @@ class FileTrayPanel(QWidget):
         )
         browse_btn.clicked.connect(self._browse_workdir)
         ch.addWidget(browse_btn)
+
+        open_btn = QPushButton("↗")
+        open_btn.setFixedSize(22, 22)
+        open_btn.setToolTip("Open in Explorer")
+        open_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {theme.BG_PANEL}; color: {theme.TEXT_MUTED};"
+            " border: none; border-radius: 6px; font-size: 13px; }"
+            f"QPushButton:hover {{ color: {theme.ACCENT}; background-color: {theme.SESSION_HOVER_BG}; }}"
+        )
+        open_btn.clicked.connect(self._open_in_explorer)
+        ch.addWidget(open_btn)
         cl.addWidget(cwd_head)
 
         self._cwd_label = QLabel("No folder")
@@ -376,6 +558,30 @@ class FileTrayPanel(QWidget):
         skill_id = self._role_ids[idx - 1] if idx > 0 and idx - 1 < len(self._role_ids) else ""
         if self._on_role_change:
             self._on_role_change(skill_id)
+
+    def _on_project_selected(self, idx: int) -> None:
+        project_id = self._project_ids[idx - 1] if idx > 0 and idx - 1 < len(self._project_ids) else ""
+        if self._on_project_change:
+            self._on_project_change(project_id)
+
+    def _on_ext_toggled(self, ext_id: str, checked: bool) -> None:
+        if checked:
+            self._active_extension_ids.add(ext_id)
+        else:
+            self._active_extension_ids.discard(ext_id)
+        if self._on_extensions_change:
+            self._on_extensions_change(list(self._active_extension_ids))
+
+    def _open_in_explorer(self) -> None:
+        path = self._workdir or str(Path.home())
+        if not Path(path).exists():
+            return
+        if os.name == "nt":
+            subprocess.Popen(["explorer", path], creationflags=subprocess.CREATE_NO_WINDOW)
+        elif os.uname().sysname == "Darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
 
     def _browse_workdir(self) -> None:
         start = self._workdir or str(Path.home())

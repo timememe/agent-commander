@@ -78,6 +78,8 @@ Skills with available="false" need dependencies installed first - you can try in
         cwd: str | None = None,
         max_history_messages: int = 30,
         role_content: str | None = None,
+        extension_context: str | None = None,
+        project_context: str | None = None,
     ) -> str:
         """
         Build a plain-text prompt for CLI-agent pass-through mode.
@@ -95,6 +97,12 @@ Skills with available="false" need dependencies installed first - you can try in
 
         if role_content:
             sections.append(f"# Active Role\n\n{role_content}")
+
+        if project_context:
+            sections.append(f"# Active Project\n\n{project_context}")
+
+        if extension_context:
+            sections.append(f"# Active Extensions\n\n{extension_context}")
 
         session_rows: list[str] = []
         if channel and chat_id:

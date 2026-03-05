@@ -6,10 +6,11 @@ import re
 import threading
 import time
 import webbrowser
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,6 +31,13 @@ _PROVIDERS = [("claude", "Claude"), ("gemini", "Gemini"), ("codex", "Codex")]
 _LOGIN_TIMEOUT_S = 180.0
 _LOGIN_POLL_S = 0.5
 _URL_RE = re.compile(r"https://\S+")
+
+# Model ID prefixes used to filter server models per provider
+_MODEL_PREFIXES: dict[str, tuple[str, ...]] = {
+    "claude": ("claude",),
+    "gemini": ("gemini",),
+    "codex": ("gpt-", "codex", "o1-", "o3-", "o4-"),
+}
 
 _PROVIDER_LOGIN_HINTS = {
     "claude": "1) Open URL.  2) Complete browser auth.  3) Press Enter below if prompted.",
@@ -54,9 +62,19 @@ class _Relay(QObject):
 class SettingsPanel(QWidget):
     """CLIProxyAPI server status + per-provider OAuth login."""
 
-    def __init__(self, server_manager: object | None = None, parent=None) -> None:
+    def __init__(
+        self,
+        server_manager: object | None = None,
+        on_model_change: Callable[[str, str], None] | None = None,
+        model_defaults: dict[str, str] | None = None,
+        on_restart_app: Callable[[], None] | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._manager = server_manager
+        self._on_model_change = on_model_change
+        self._model_defaults: dict[str, str] = model_defaults or {}
+        self._on_restart_app = on_restart_app
 
         self._status_labels: dict[str, QLabel] = {}
         self._auth_buttons: dict[str, QPushButton] = {}
@@ -71,6 +89,9 @@ class SettingsPanel(QWidget):
         self._keepalive_stop: dict[str, threading.Event] = {}
         self._codex_callback_seen: set[str] = set()
         self._opened_urls: set[str] = set()
+        self._model_combos: dict[str, QComboBox] = {}
+        self._all_models: list[str] = []
+        self._combo_updating = False
 
         self._server_status_lbl: QLabel | None = None
         self._server_detail_lbl: QLabel | None = None
@@ -119,6 +140,32 @@ class SettingsPanel(QWidget):
         vl = QVBoxLayout(body)
         vl.setContentsMargins(20, 16, 20, 16)
         vl.setSpacing(14)
+
+        # --- Application section ---
+        app_title = QLabel("Application")
+        app_title.setStyleSheet(
+            f"color: {theme.TEXT}; font-weight: bold; font-size: 16px; background: transparent;"
+        )
+        vl.addWidget(app_title)
+
+        app_row = QWidget()
+        app_row.setStyleSheet("background: transparent;")
+        arl = QHBoxLayout(app_row)
+        arl.setContentsMargins(0, 0, 0, 0)
+        arl.setSpacing(8)
+        restart_app_btn = QPushButton("Restart App")
+        restart_app_btn.setFixedWidth(130)
+        restart_app_btn.setToolTip("Restart the entire Agent Commander application")
+        restart_app_btn.clicked.connect(self._do_restart_app)
+        arl.addWidget(restart_app_btn)
+        arl.addStretch()
+        vl.addWidget(app_row)
+
+        # Separator
+        sep0 = QFrame()
+        sep0.setFrameShape(QFrame.Shape.HLine)
+        sep0.setStyleSheet("background: transparent; border: none; max-height: 0px;")
+        vl.addWidget(sep0)
 
         # --- Server section ---
         server_title = QLabel("CLIProxyAPI Server")
@@ -209,6 +256,23 @@ class SettingsPanel(QWidget):
         )
         tl.addWidget(status_lbl, stretch=1)
         self._status_labels[key] = status_lbl
+
+        model_combo = QComboBox()
+        model_combo.setFixedWidth(220)
+        model_combo.setVisible(False)
+        model_combo.setToolTip("Select model for this provider")
+        model_combo.setStyleSheet(
+            f"QComboBox {{ background-color: {theme.BG_INPUT}; color: {theme.TEXT};"
+            " border: none; border-radius: 5px; padding: 3px 8px; font-size: 12px; }}"
+            f"QComboBox::drop-down {{ border: none; }}"
+            f"QComboBox QAbstractItemView {{ background-color: {theme.BG_INPUT};"
+            f" color: {theme.TEXT}; selection-background-color: {theme.SESSION_ACTIVE_BG}; }}"
+        )
+        model_combo.currentIndexChanged.connect(
+            lambda idx, k=key: self._on_combo_changed(k)
+        )
+        tl.addWidget(model_combo)
+        self._model_combos[key] = model_combo
 
         auth_btn = QPushButton("Login")
         auth_btn.setFixedWidth(110)
@@ -319,6 +383,8 @@ class SettingsPanel(QWidget):
         elif action == "login_done":
             key, rc, ok = payload
             self._finish_login(key, rc, ok)
+        elif action == "model_list":
+            self._populate_model_combos(payload or [])
 
     def _emit(self, action: str, payload: object = None) -> None:
         """Thread-safe: emit relay signal from any thread."""
@@ -350,6 +416,7 @@ class SettingsPanel(QWidget):
                 self._emit("server_text", ("Server not responding", theme.DANGER))
                 for k in [p[0] for p in _PROVIDERS]:
                     self._emit("provider_status", (k, False))
+                self._emit("model_list", [])
                 self._emit("server_btns", True)
                 return
 
@@ -362,6 +429,7 @@ class SettingsPanel(QWidget):
             )
             for k in [p[0] for p in _PROVIDERS]:
                 self._emit("provider_status", (k, provider_status.get(k, False)))
+            self._emit("model_list", models)
             self._emit("server_btns", True)
 
         threading.Thread(target=_check, daemon=True, name="settings-check").start()
@@ -382,6 +450,7 @@ class SettingsPanel(QWidget):
                 self._provider_connected[key] = False
         if connected is not None and key not in self._provider_busy:
             self._sync_auth_button(key)
+            self._sync_model_combo(key)
 
     def _sync_auth_button(self, key: str) -> None:
         btn = self._auth_buttons.get(key)
@@ -719,6 +788,62 @@ class SettingsPanel(QWidget):
                     time.sleep(0.2)
             except Exception:
                 return
+
+    # ------------------------------------------------------------------
+    # Model combo helpers
+    # ------------------------------------------------------------------
+
+    def _populate_model_combos(self, all_models: list[str]) -> None:
+        """Fill each provider's model combo from the server model list."""
+        self._all_models = all_models
+        for key, combo in self._model_combos.items():
+            prefixes = _MODEL_PREFIXES.get(key, ())
+            provider_models = [
+                m for m in all_models
+                if any(m.lower().startswith(p) for p in prefixes)
+            ]
+            self._combo_updating = True
+            combo.clear()
+            if provider_models:
+                combo.addItems(provider_models)
+                default = self._model_defaults.get(key, "")
+                if default:
+                    idx = combo.findText(default)
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+                    else:
+                        # Configured model not in list — insert at top
+                        combo.insertItem(0, default)
+                        combo.setCurrentIndex(0)
+            self._combo_updating = False
+            self._sync_model_combo(key)
+
+    def _sync_model_combo(self, key: str) -> None:
+        """Show combo only when provider is connected and models are available."""
+        combo = self._model_combos.get(key)
+        if combo is None:
+            return
+        connected = self._provider_connected.get(key, False)
+        combo.setVisible(bool(connected and combo.count() > 0))
+
+    def _on_combo_changed(self, key: str) -> None:
+        """Called when user selects a model from the dropdown."""
+        if self._combo_updating:
+            return
+        combo = self._model_combos.get(key)
+        if combo is None:
+            return
+        model_id = combo.currentText()
+        if model_id and self._on_model_change:
+            self._on_model_change(key, model_id)
+
+    # ------------------------------------------------------------------
+    # Application restart
+    # ------------------------------------------------------------------
+
+    def _do_restart_app(self) -> None:
+        if self._on_restart_app:
+            self._on_restart_app()
 
     def cleanup(self) -> None:
         for p in list(self._login_processes.keys()):

@@ -29,8 +29,10 @@ from agent_commander.gui_qt.input_bar import InputBar
 from agent_commander.gui_qt.new_session_dialog import NewSessionDialog
 from agent_commander.gui_qt.session_list import SessionListWidget
 from agent_commander.gui_qt.settings_panel import SettingsPanel
+from agent_commander.gui_qt.projects_panel import ProjectsPanel
 from agent_commander.gui_qt.team_panel import TeamPanel
 from agent_commander.session.gui_store import GUIStore, SessionMeta, StoredMessage
+from agent_commander.session.project_store import ProjectStore
 from agent_commander.session.skill_store import SkillStore
 
 if TYPE_CHECKING:
@@ -42,11 +44,13 @@ _PANEL_CHAT = 0
 _PANEL_EXTENSIONS = 1
 _PANEL_SETTINGS = 2
 _PANEL_TEAM = 3
+_PANEL_PROJECTS = 4
 
 _MODE_TOGGLES = [
     (_PANEL_EXTENSIONS, "Extensions"),
     (_PANEL_SETTINGS, "Settings"),
     (_PANEL_TEAM, "Team"),
+    (_PANEL_PROJECTS, "Projects"),
 ]
 
 _WARN_THRESHOLD = 25.0
@@ -73,6 +77,9 @@ class QtApp(QMainWindow):
         on_user_input: Callable[[str, str, str, str | None, dict | None], None] | None = None,
         on_session_start: Callable[[str, str, str | None], None] | None = None,
         on_close: Callable[[], None] | None = None,
+        on_restart_app: Callable[[], None] | None = None,
+        on_model_change: Callable[[str, str], None] | None = None,
+        model_defaults: dict[str, str] | None = None,
         default_agent: str = "codex",
         window_width: int = 1400,
         window_height: int = 800,
@@ -86,6 +93,9 @@ class QtApp(QMainWindow):
         self._on_user_input = on_user_input
         self._on_session_start = on_session_start
         self._on_close = on_close
+        self._on_restart_app = on_restart_app
+        self._on_model_change = on_model_change
+        self._model_defaults = model_defaults or {}
         self._default_agent = default_agent
         self._session_store = session_store or GUIStore()
         self._agent_workdirs = agent_workdirs or {}
@@ -97,13 +107,16 @@ class QtApp(QMainWindow):
         self._session_cwds: dict[str, str] = {}
         self._session_titles: dict[str, str] = {}
         self._session_roles: dict[str, str] = {}
+        self._session_extensions: dict[str, list[str]] = {}
         self._session_cycle_mode: dict[str, bool] = {}
+        self._session_projects: dict[str, str] = {}
         self._chat_panels: dict[str, ChatPanel] = {}
         self._pending_tools: dict[str, ToolBubble] = {}
         self._files_visible = True
         self._usage_snapshots: dict[str, "AgentUsageSnapshot"] = {}
         self._usage_label: QLabel | None = None
         self._skill_store = SkillStore()
+        self._project_store = ProjectStore()
 
         # Cycle mode state
         self._cycle_running = False
@@ -212,9 +225,15 @@ class QtApp(QMainWindow):
             on_cwd_change=self._on_cwd_change,
             on_role_change=self._on_role_change,
             on_cycle_mode_change=self._on_cycle_mode_toggled,
+            on_extensions_change=self._on_extensions_change,
+            on_project_change=self._on_project_change,
             skill_store=self._skill_store,
+            extension_store=self._extension_store,
+            project_store=self._project_store,
         )
         self._file_tray.refresh_roles()
+        self._file_tray.refresh_extensions()
+        self._file_tray.refresh_projects()
         self._file_tray.setFixedWidth(260)
         self._file_tray.setStyleSheet(
             f"background-color: {theme.BG_PANEL};"
@@ -235,7 +254,12 @@ class QtApp(QMainWindow):
         self._content_stack.addWidget(self._extensions_panel)  # index 1
 
         # ── Panel 2: Settings ───────────────────────────────────────────
-        self._settings_panel = SettingsPanel(server_manager=self._server_manager)
+        self._settings_panel = SettingsPanel(
+            server_manager=self._server_manager,
+            on_model_change=self._on_model_change,
+            model_defaults=self._model_defaults,
+            on_restart_app=self._on_restart_app,
+        )
         self._content_stack.addWidget(self._settings_panel)    # index 2
 
         # ── Panel 3: Team (Skill Library) ────────────────────────────────
@@ -244,6 +268,13 @@ class QtApp(QMainWindow):
             on_skill_changed=self._on_skill_changed,
         )
         self._content_stack.addWidget(self._team_panel)        # index 3
+
+        # ── Panel 4: Projects ────────────────────────────────────────────
+        self._projects_panel = ProjectsPanel(
+            project_store=self._project_store,
+            on_project_changed=self._on_project_store_changed,
+        )
+        self._content_stack.addWidget(self._projects_panel)    # index 4
 
         self._set_active_panel(_PANEL_CHAT)
         root.addWidget(right, stretch=1)
@@ -342,10 +373,13 @@ class QtApp(QMainWindow):
             self._extensions_panel.refresh()
         elif idx == _PANEL_TEAM:
             self._team_panel.refresh()
+        elif idx == _PANEL_PROJECTS:
+            self._projects_panel.refresh()
         elif idx == _PANEL_CHAT and self._active_session_id:
             panel = self._chat_panels.get(self._active_session_id)
             if panel is not None:
                 panel.refresh_layout()
+            self._file_tray.refresh_extensions()
         self._refresh_chat_title()
 
     def _toggle_file_tray(self) -> None:
@@ -378,6 +412,11 @@ class QtApp(QMainWindow):
         sid = self._active_session_id
         if sid:
             self._session_cwds[sid] = cwd
+            for meta in self._session_store.list_sessions():
+                if meta.session_id == sid:
+                    meta.workdir = cwd
+                    self._session_store.upsert_meta(meta)
+                    break
         else:
             self._default_cwd = cwd
         self._input_bar.set_cwd(cwd)
@@ -385,16 +424,63 @@ class QtApp(QMainWindow):
 
     def _on_role_change(self, skill_id: str) -> None:
         sid = self._active_session_id
-        if sid:
-            self._session_roles[sid] = skill_id
+        if not sid:
+            return
+        self._session_roles[sid] = skill_id
+        for meta in self._session_store.list_sessions():
+            if meta.session_id == sid:
+                meta.active_skill_ids = [skill_id] if skill_id else []
+                self._session_store.upsert_meta(meta)
+                break
+
+    def _on_extensions_change(self, active_ids: list[str]) -> None:
+        sid = self._active_session_id
+        if not sid:
+            return
+        self._session_extensions[sid] = list(active_ids)
+        for meta in self._session_store.list_sessions():
+            if meta.session_id == sid:
+                meta.active_extension_ids = list(active_ids)
+                self._session_store.upsert_meta(meta)
+                break
 
     def _on_skill_changed(self) -> None:
         """Called after any Team panel create/update/delete — refreshes role combo."""
         self._file_tray.refresh_roles()
-        # Restore active session's role after refresh
         sid = self._active_session_id
         if sid:
             self._file_tray.set_role(self._session_roles.get(sid, ""))
+
+    def _on_project_store_changed(self) -> None:
+        """Called after any Projects panel create/update/delete — refreshes project combo."""
+        self._file_tray.refresh_projects()
+        sid = self._active_session_id
+        if sid:
+            self._file_tray.set_project(self._session_projects.get(sid, ""))
+
+    def _on_project_change(self, project_id: str) -> None:
+        sid = self._active_session_id
+        if not sid:
+            return
+        self._session_projects[sid] = project_id
+        # Persist to session store
+        for meta in self._session_store.list_sessions():
+            if meta.session_id == sid:
+                meta.project_id = project_id or None
+                self._session_store.upsert_meta(meta)
+                break
+        # If the project has a workdir, switch the session's CWD to it
+        if project_id:
+            proj = self._project_store.get_project(project_id)
+            if proj and proj.workdir:
+                self._session_cwds[sid] = proj.workdir
+                self._input_bar.set_cwd(proj.workdir)
+                self._file_tray.set_workdir(proj.workdir)
+                for meta in self._session_store.list_sessions():
+                    if meta.session_id == sid:
+                        meta.workdir = proj.workdir
+                        self._session_store.upsert_meta(meta)
+                        break
 
     def _restore_cycle_state_for_session(self, session_id: str) -> None:
         """Sync cycle-mode UI to the state saved for session_id."""
@@ -493,6 +579,21 @@ class QtApp(QMainWindow):
             if role_content:
                 metadata = {"role_content": role_content}
 
+        ext_ids = self._session_extensions.get(session_id, [])
+        if ext_ids and self._extension_store is not None:
+            ext_ctx = self._extension_store.build_context(ext_ids)
+            if ext_ctx:
+                metadata = metadata or {}
+                metadata["extension_context"] = ext_ctx
+                metadata["active_extension_ids"] = ext_ids
+
+        project_id = self._session_projects.get(session_id, "")
+        if project_id:
+            project_ctx = self._project_store.build_context(project_id)
+            if project_ctx:
+                metadata = metadata or {}
+                metadata["project_context"] = project_ctx
+
         self._agent_busy = True
         if self._on_user_input:
             self._on_user_input(session_id, self._cycle_task, agent, cwd, metadata)
@@ -560,6 +661,14 @@ class QtApp(QMainWindow):
         self._chat_panels[meta.session_id] = panel
         self._session_agents[meta.session_id] = meta.agent
         self._session_titles[meta.session_id] = meta.title or meta.session_id[:12]
+        if meta.active_extension_ids:
+            self._session_extensions[meta.session_id] = list(meta.active_extension_ids)
+        if meta.active_skill_ids:
+            self._session_roles[meta.session_id] = meta.active_skill_ids[0]
+        if meta.project_id:
+            self._session_projects[meta.session_id] = meta.project_id
+        if meta.workdir:
+            self._session_cwds[meta.session_id] = meta.workdir
         self._chat_stack.addWidget(panel)
         self._session_list.add_session(meta)
 
@@ -592,11 +701,13 @@ class QtApp(QMainWindow):
         panel.refresh_layout()
         self._session_list.set_active(session_id)
         self._refresh_chat_title()
-        # Restore saved CWD, role, and cycle mode for this session
+        # Restore saved CWD, role, extensions, and cycle mode for this session
         saved_cwd = self._session_cwds.get(session_id, self._default_cwd)
         self._input_bar.set_cwd(saved_cwd)
         self._sync_file_tray()
         self._file_tray.set_role(self._session_roles.get(session_id, ""))
+        self._file_tray.set_extensions(self._session_extensions.get(session_id, []))
+        self._file_tray.set_project(self._session_projects.get(session_id, ""))
         self._restore_cycle_state_for_session(session_id)
 
     def _on_delete_session(self, session_id: str) -> None:
@@ -611,7 +722,9 @@ class QtApp(QMainWindow):
         self._session_cwds.pop(session_id, None)
         self._session_titles.pop(session_id, None)
         self._session_roles.pop(session_id, None)
+        self._session_extensions.pop(session_id, None)
         self._session_cycle_mode.pop(session_id, None)
+        self._session_projects.pop(session_id, None)
         self._pending_tools.pop(session_id, None)
         # Stop cycle if it was running on the deleted session
         if self._cycle_session_id == session_id and self._cycle_running:
@@ -661,6 +774,21 @@ class QtApp(QMainWindow):
             role_content = self._skill_store.get_content(role_id)
             if role_content:
                 metadata = {"role_content": role_content}
+
+        ext_ids = self._session_extensions.get(session_id, [])
+        if ext_ids and self._extension_store is not None:
+            ext_ctx = self._extension_store.build_context(ext_ids)
+            if ext_ctx:
+                metadata = metadata or {}
+                metadata["extension_context"] = ext_ctx
+                metadata["active_extension_ids"] = ext_ids
+
+        project_id = self._session_projects.get(session_id, "")
+        if project_id:
+            project_ctx = self._project_store.build_context(project_id)
+            if project_ctx:
+                metadata = metadata or {}
+                metadata["project_context"] = project_ctx
 
         self._agent_busy = True
         if self._on_user_input:

@@ -45,6 +45,8 @@ class QtChannel:
         project_store: "ProjectStore | None" = None,
         extension_store: "ExtensionStore | None" = None,
         usage_monitors: "list[UsageMonitor] | None" = None,
+        on_model_change: "object | None" = None,
+        model_defaults: "dict[str, str] | None" = None,
     ) -> None:
         self.bus = bus
         self.default_cwd = default_cwd
@@ -62,6 +64,10 @@ class QtChannel:
         self.project_store = project_store
         self.extension_store = extension_store
         self.usage_monitors: list[UsageMonitor] = usage_monitors or []
+
+        self.on_model_change = on_model_change
+        self.model_defaults: dict[str, str] = model_defaults or {}
+        self._restart_requested = False
 
         self._app: QtApp | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -89,6 +95,13 @@ class QtChannel:
 
         while not self._stopped.is_set():
             await asyncio.sleep(0.2)
+
+    def request_restart(self) -> None:
+        """Signal that the app should restart after shutdown."""
+        self._restart_requested = True
+        app = self._app
+        if app:
+            app.stop()
 
     async def stop(self) -> None:
         """Stop Qt GUI runtime."""
@@ -278,10 +291,16 @@ class QtChannel:
         def _close_callback() -> None:
             self._stopped.set()
 
+        def _restart_app_callback() -> None:
+            self.request_restart()
+
         self._app = QtApp(
             on_user_input=_input_callback,
             on_session_start=_session_start_callback,
             on_close=_close_callback,
+            on_restart_app=_restart_app_callback,
+            on_model_change=self.on_model_change,
+            model_defaults=self.model_defaults,
             default_agent=self.default_agent,
             window_width=self.window_width,
             window_height=self.window_height,

@@ -33,6 +33,7 @@ class ProjectMeta:
     created_at: str = ""
     updated_at: str = ""
     agent_ids: list[str] = field(default_factory=list)
+    checklist: list[dict] = field(default_factory=list)  # [{"text": str, "done": bool}]
 
 
 class ProjectStore:
@@ -162,9 +163,29 @@ class ProjectStore:
                 created_at=data.get("created_at", ""),
                 updated_at=data.get("updated_at", ""),
                 agent_ids=data.get("agent_ids", []),
+                checklist=data.get("checklist", []),
             )
         except Exception:
             return None
+
+    def build_context(self, project_id: str) -> str:
+        """Return a markdown context block for injection into agent prompts."""
+        meta = self.get_project(project_id)
+        if meta is None:
+            return ""
+        lines: list[str] = [f"## Active Project: {meta.name}"]
+        if meta.description:
+            lines.append(f"\n{meta.description}")
+        if meta.workdir:
+            lines.append(f"\n**Project path:** `{meta.workdir}`")
+        if meta.checklist:
+            done = sum(1 for item in meta.checklist if item.get("done"))
+            total = len(meta.checklist)
+            lines.append(f"\n**Checklist ({done}/{total} done):**")
+            for item in meta.checklist:
+                mark = "x" if item.get("done") else " "
+                lines.append(f"- [{mark}] {item.get('text', '')}")
+        return "\n".join(lines)
 
     def _write_meta(self, meta: ProjectMeta) -> None:
         meta_path = self._root / meta.project_id / "project.json"

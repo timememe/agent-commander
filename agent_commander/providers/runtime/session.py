@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import re
 import subprocess
@@ -9,6 +10,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
 try:
     import pyte
@@ -211,6 +214,7 @@ class AgentSession:
                 encoding="utf-8",
                 errors="ignore",
                 timeout=timeout_s,
+                **_NO_WINDOW,
             )
         except Exception as exc:
             return str(exc)

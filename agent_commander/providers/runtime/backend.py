@@ -6,6 +6,8 @@ import os
 import subprocess
 from typing import Optional, Protocol
 
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
 
 class PTYBackend(Protocol):
     """Minimal PTY backend contract."""
@@ -133,6 +135,7 @@ class WinptyBackend:
                     ["taskkill", "/F", "/T", "/PID", str(pid)],
                     capture_output=True,
                     timeout=3,
+                    **_NO_WINDOW,
                 )
             except Exception:
                 pass
@@ -160,6 +163,7 @@ class SubprocessFallbackBackend:
             errors="ignore",
             bufsize=1,
             cwd=cwd,
+            **_NO_WINDOW,
         )
 
     def read(self) -> str:
@@ -189,6 +193,7 @@ class SubprocessFallbackBackend:
                     ["taskkill", "/F", "/T", "/PID", str(pid)],
                     capture_output=True,
                     timeout=3,
+                    **_NO_WINDOW,
                 )
             except Exception:
                 pass

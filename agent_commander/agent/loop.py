@@ -116,7 +116,10 @@ class AgentLoop:
                     await self.terminal_callback(msg, "", True)
                 logger.info(f"Prewarmed proxy session {session_key} [{agent_key}]")
                 return None
-            provider_session = ProxySession(agent_key=agent_key, cwd=cwd)
+            active_ext_ids = list(metadata.get("active_extension_ids") or [])
+            provider_session = ProxySession(
+                agent_key=agent_key, cwd=cwd, active_extension_ids=active_ext_ids
+            )
             return await self._run_turn(
                 msg=msg,
                 metadata=metadata,
@@ -178,6 +181,8 @@ class AgentLoop:
         session_cwd = str(getattr(provider_session, "cwd", "") or metadata.get("cwd", str(self.workspace)) or str(self.workspace))
 
         role_content = str(metadata.get("role_content", "")).strip() or None
+        extension_context = str(metadata.get("extension_context", "")).strip() or None
+        project_context = str(metadata.get("project_context", "")).strip() or None
         prompt = self.context.build_cli_turn_prompt(
             history=session.get_history(),
             current_message=msg.content,
@@ -185,6 +190,8 @@ class AgentLoop:
             chat_id=origin_chat_id,
             cwd=session_cwd,
             role_content=role_content,
+            extension_context=extension_context,
+            project_context=project_context,
         )
 
         chunks: list[str] = []

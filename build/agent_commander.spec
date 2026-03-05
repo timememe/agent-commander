@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for Agent Commander GUI."""
+"""PyInstaller spec for Agent Commander GUI (Qt backend)."""
 
 import os
 import sys
@@ -11,14 +11,15 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_sub
 PROJECT_ROOT = Path(SPECPATH).parent.resolve()
 
 # ---------------------------------------------------------------------------
-# Collect customtkinter assets (themes, json, images)
+# Collect only the PySide6 modules we actually use
+# (QtCore, QtGui, QtWidgets — skip WebEngine, Multimedia, 3D, etc.)
 # ---------------------------------------------------------------------------
-ctk_datas, ctk_binaries, ctk_hiddenimports = collect_all("customtkinter")
-
-# ---------------------------------------------------------------------------
-# Collect tkinterdnd2 (native libtkdnd DLL + Python wrapper)
-# ---------------------------------------------------------------------------
-tkdnd_datas, tkdnd_binaries, tkdnd_hiddenimports = collect_all("tkinterdnd2")
+pyside6_datas, pyside6_binaries, pyside6_hiddenimports = [], [], []
+for _mod in ("PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "PySide6.QtSvg"):
+    _d, _b, _h = collect_all(_mod)
+    pyside6_datas += _d
+    pyside6_binaries += _b
+    pyside6_hiddenimports += _h
 
 # ---------------------------------------------------------------------------
 # Skill markdown/shell files (agent_commander/skills/**/*)
@@ -53,7 +54,6 @@ if not icon_path.exists():
 else:
     icon_path = str(icon_path)
 
-# Bundle logo_w.ico at the dist root so the GUI can call iconbitmap() at runtime
 logo_ico = PROJECT_ROOT / "logo_w.ico"
 logo_datas = [(str(logo_ico), ".")] if logo_ico.exists() else []
 
@@ -79,28 +79,19 @@ hidden_imports = [
     "click",
     "agent_commander",
     "agent_commander.cli.commands",
-    "agent_commander.gui",
-    "agent_commander.gui.app",
     "agent_commander.gui.launcher",
-    "agent_commander.gui.channel",
-    "agent_commander.gui.chat_panel",
-    "agent_commander.gui.input_bar",
-    "agent_commander.gui.sidebar",
-    "agent_commander.gui.session_list",
-    "agent_commander.gui.agent_selector",
-    "agent_commander.gui.terminal_panel",
-    "agent_commander.gui.file_tray",
-    "agent_commander.gui.settings_dialog",
-    "agent_commander.gui.skill_bar",
-    "agent_commander.gui.team_dialog",
-    "agent_commander.gui.notifications",
-    "agent_commander.gui.events",
-    "agent_commander.gui.state_store",
-    "agent_commander.gui.theme",
-    "agent_commander.gui.widgets",
-    "agent_commander.gui.widgets.chat_bubble",
-    "agent_commander.gui.widgets.markdown_view",
-    "agent_commander.gui.widgets.status_bar",
+    # Qt GUI
+    "agent_commander.gui_qt",
+    "agent_commander.gui_qt.app",
+    "agent_commander.gui_qt.channel",
+    "agent_commander.gui_qt.chat_panel",
+    "agent_commander.gui_qt.input_bar",
+    "agent_commander.gui_qt.session_list",
+    "agent_commander.gui_qt.file_tray",
+    "agent_commander.gui_qt.settings_panel",
+    "agent_commander.gui_qt.extensions_panel",
+    "agent_commander.gui_qt.theme",
+    # Agent core
     "agent_commander.agent.loop",
     "agent_commander.agent.context",
     "agent_commander.agent.memory",
@@ -113,18 +104,16 @@ hidden_imports = [
     "agent_commander.cron.types",
     "agent_commander.heartbeat.service",
     "agent_commander.providers.base",
-    "agent_commander.providers.proxy_api",
-    "agent_commander.providers.proxy_server",
+    "agent_commander.providers.provider",
+    "agent_commander.providers.transport.proxy_session",
+    "agent_commander.providers.transport.proxy_server",
     "agent_commander.providers.tools",
-    "agent_commander.providers.agent_registry",
-    "agent_commander.providers.agent_session",
-    "agent_commander.providers.pty_backend",
-    "agent_commander.providers.signal_filter",
-    "agent_commander.providers.marker_parser",
-    "agent_commander.providers.capabilities",
+    "agent_commander.providers.runtime.registry",
+    "agent_commander.providers.runtime.session",
     "agent_commander.session.manager",
     "agent_commander.session.gui_store",
     "agent_commander.session.skill_store",
+    "agent_commander.session.extension_store",
     "agent_commander.utils.helpers",
 ]
 
@@ -142,9 +131,9 @@ if sys.platform == "win32":
 a = Analysis(
     [str(PROJECT_ROOT / "agent_commander" / "gui" / "launcher.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=ctk_binaries + tkdnd_binaries,
-    datas=ctk_datas + tkdnd_datas + skills_datas + workspace_datas + logo_datas,
-    hiddenimports=hidden_imports + ctk_hiddenimports + tkdnd_hiddenimports,
+    binaries=pyside6_binaries,
+    datas=pyside6_datas + skills_datas + workspace_datas + logo_datas,
+    hiddenimports=hidden_imports + pyside6_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -159,6 +148,39 @@ a = Analysis(
         "jupyter",
         "notebook",
         "IPython",
+        "customtkinter",
+        "tkinterdnd2",
+        # Unused PySide6 submodules (saves ~500MB)
+        "PySide6.QtWebEngine",
+        "PySide6.QtWebEngineCore",
+        "PySide6.QtWebEngineWidgets",
+        "PySide6.QtMultimedia",
+        "PySide6.QtMultimediaWidgets",
+        "PySide6.Qt3DCore",
+        "PySide6.Qt3DRender",
+        "PySide6.Qt3DInput",
+        "PySide6.Qt3DLogic",
+        "PySide6.Qt3DAnimation",
+        "PySide6.Qt3DExtras",
+        "PySide6.QtCharts",
+        "PySide6.QtDataVisualization",
+        "PySide6.QtQuick",
+        "PySide6.QtQuickWidgets",
+        "PySide6.QtQml",
+        "PySide6.QtLocation",
+        "PySide6.QtPositioning",
+        "PySide6.QtSensors",
+        "PySide6.QtBluetooth",
+        "PySide6.QtNfc",
+        "PySide6.QtWebSockets",
+        "PySide6.QtWebChannel",
+        "PySide6.QtPdf",
+        "PySide6.QtPdfWidgets",
+        "PySide6.QtVirtualKeyboard",
+        "PySide6.QtRemoteObjects",
+        "PySide6.QtScxml",
+        "PySide6.QtStateMachine",
+        "PySide6.QtTextToSpeech",
     ],
     noarchive=False,
 )

@@ -13,6 +13,8 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
 from loguru import logger
 
 
@@ -339,6 +341,7 @@ class ProxyServerManager:
                     errors="ignore",
                     timeout=6.0,
                     check=False,
+                    **_NO_WINDOW,
                 )
             except Exception:
                 completed = None
@@ -354,6 +357,7 @@ class ProxyServerManager:
                     errors="ignore",
                     timeout=8.0,
                     check=False,
+                    **_NO_WINDOW,
                 )
             except Exception:
                 completed = None
@@ -553,6 +557,7 @@ class ProxyServerManager:
                 text=True,
                 timeout=3.0,
                 check=False,
+                **_NO_WINDOW,
             )
         except Exception:
             return pids
@@ -620,6 +625,7 @@ class ProxyServerManager:
                     text=True,
                     timeout=5.0,
                     check=False,
+                    **_NO_WINDOW,
                 )
                 if result.returncode == 0:
                     return True
@@ -641,6 +647,7 @@ class ProxyServerManager:
                     text=True,
                     timeout=5.0,
                     check=False,
+                    **_NO_WINDOW,
                 )
                 if ps.returncode != 0:
                     ps_err = (ps.stderr or "").strip()

@@ -9,6 +9,7 @@ __pycache__/
 *.egg
 dist/
 dist_new/
+dist_nuitka/
 build/pyinstaller_work/
 *.spec.bak
 

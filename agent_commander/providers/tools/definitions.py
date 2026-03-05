@@ -12,12 +12,17 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
 from loguru import logger
 
 from .email import EMAIL_TOOL_DEFINITIONS, execute_email_tool
+from .calendar import CALENDAR_TOOL_DEFINITIONS, execute_calendar_tool
 
 if TYPE_CHECKING:
     from agent_commander.session.extension_store import ExtensionStore
+    from agent_commander.session.skill_store import SkillStore
+    from agent_commander.session.project_store import ProjectStore
 
 MAX_RESULT_CHARS = 32_000
 COMMAND_TIMEOUT_S = 30
@@ -325,6 +330,100 @@ TOOL_DEFINITIONS = [
         },
     },
     *EMAIL_TOOL_DEFINITIONS,
+    *CALENDAR_TOOL_DEFINITIONS,
+]
+
+# ---------------------------------------------------------------------------
+# Team & Project tool definitions (appended when stores are available)
+# ---------------------------------------------------------------------------
+
+TEAM_PROJECT_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "team_list_roles",
+            "description": "List all roles in the Team skill library. Returns names, categories and descriptions.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "team_upsert_role",
+            "description": (
+                "Create a new role or update an existing one (matched by name) in the Team skill library. "
+                "Use this to capture reusable instructions, personas, or expertise profiles."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Role name (unique identifier)."},
+                    "category": {"type": "string", "description": "Category tag, e.g. 'Dev', 'Design', 'Management'."},
+                    "description": {"type": "string", "description": "Short one-line description."},
+                    "content": {"type": "string", "description": "Full role instructions in Markdown."},
+                },
+                "required": ["name", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_list",
+            "description": "List all projects with their checklist progress.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_upsert",
+            "description": (
+                "Create a new project or update an existing one (matched by name). "
+                "Use this to track goals, set the project path, and maintain a checklist of milestones."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Project name (unique identifier)."},
+                    "description": {"type": "string", "description": "Project description or goal."},
+                    "workdir": {"type": "string", "description": "Absolute path to the project directory (optional)."},
+                    "checklist": {
+                        "type": "array",
+                        "description": "Full checklist for the project. Replaces existing checklist.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string"},
+                                "done": {"type": "boolean"},
+                            },
+                            "required": ["text"],
+                        },
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_set_checklist_item",
+            "description": (
+                "Mark a specific checklist item as done or not done in a project. "
+                "Use this to track progress as you complete milestones."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_name": {"type": "string", "description": "Name of the project."},
+                    "item_text": {"type": "string", "description": "Exact text of the checklist item to update."},
+                    "done": {"type": "boolean", "description": "True to mark as done, false to unmark."},
+                },
+                "required": ["project_name", "item_text", "done"],
+            },
+        },
+    },
 ]
 
 
@@ -333,6 +432,9 @@ def execute_tool(
     arguments_json: str,
     cwd: str | None = None,
     extension_store: "ExtensionStore | None" = None,
+    active_extension_ids: list[str] | None = None,
+    skill_store: "SkillStore | None" = None,
+    project_store: "ProjectStore | None" = None,
 ) -> str:
     """Execute a tool by name and return the result as a string."""
     try:
@@ -375,12 +477,152 @@ def execute_tool(
         elif name.startswith("email_"):
             if extension_store is None:
                 return "Error: email tools require extensions (no extension_store provided)"
-            return execute_email_tool(name=name, args=args, extension_store=extension_store)
+            return execute_email_tool(
+                name=name, args=args, extension_store=extension_store,
+                active_ids=active_extension_ids,
+            )
+        elif name.startswith("calendar_"):
+            if extension_store is None:
+                return "Error: calendar tools require extensions (no extension_store provided)"
+            return execute_calendar_tool(
+                name=name, args=args, extension_store=extension_store,
+                active_ids=active_extension_ids,
+            )
+        elif name == "team_list_roles":
+            return _team_list_roles(skill_store)
+        elif name == "team_upsert_role":
+            return _team_upsert_role(
+                args.get("name", ""), args.get("category", ""),
+                args.get("description", ""), args.get("content", ""), skill_store,
+            )
+        elif name == "project_list":
+            return _project_list(project_store)
+        elif name == "project_upsert":
+            return _project_upsert(
+                args.get("name", ""), args.get("description", ""),
+                args.get("workdir", ""), args.get("checklist", []), project_store,
+            )
+        elif name == "project_set_checklist_item":
+            return _project_set_checklist_item(
+                args.get("project_name", ""), args.get("item_text", ""),
+                bool(args.get("done", False)), project_store,
+            )
         else:
             return f"Error: unknown tool '{name}'"
     except Exception as exc:
         logger.warning(f"Tool '{name}' failed: {exc}")
         return f"Error executing {name}: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Team & Project tool implementations
+# ---------------------------------------------------------------------------
+
+
+def _team_list_roles(skill_store: "SkillStore | None") -> str:
+    if skill_store is None:
+        return "Error: team skill store not available"
+    skills = skill_store.list_skills()
+    if not skills:
+        return "No roles defined yet."
+    lines = ["Roles in Team library:\n"]
+    for s in skills:
+        cat = f"  [{s.category}]" if s.category else ""
+        lines.append(f"- **{s.name}**{cat}: {s.description}")
+    return "\n".join(lines)
+
+
+def _team_upsert_role(
+    name: str, category: str, description: str, content: str,
+    skill_store: "SkillStore | None",
+) -> str:
+    if skill_store is None:
+        return "Error: team skill store not available"
+    if not name:
+        return "Error: name is required"
+    # Find existing by name
+    existing = next((s for s in skill_store.list_skills() if s.name.lower() == name.lower()), None)
+    if existing:
+        skill_store.update_skill(existing.id, name, description, category, content)
+        return f"Role '{name}' updated successfully."
+    else:
+        skill_store.create_skill(name, description, category, content)
+        return f"Role '{name}' created successfully."
+
+
+def _project_list(project_store: "ProjectStore | None") -> str:
+    if project_store is None:
+        return "Error: project store not available"
+    projects = project_store.list_projects()
+    if not projects:
+        return "No projects defined yet."
+    lines = ["Projects:\n"]
+    for p in projects:
+        done = sum(1 for item in p.checklist if item.get("done"))
+        total = len(p.checklist)
+        progress = f" [{done}/{total} done]" if total else ""
+        path = f" — {p.workdir}" if p.workdir else ""
+        lines.append(f"- **{p.name}**{progress}{path}: {p.description}")
+    return "\n".join(lines)
+
+
+def _project_upsert(
+    name: str, description: str, workdir: str, checklist: list,
+    project_store: "ProjectStore | None",
+) -> str:
+    if project_store is None:
+        return "Error: project store not available"
+    if not name:
+        return "Error: name is required"
+    # Normalise checklist items
+    normalised = [
+        {"text": str(item.get("text", "")), "done": bool(item.get("done", False))}
+        for item in checklist if item.get("text")
+    ]
+    existing = next((p for p in project_store.list_projects() if p.name.lower() == name.lower()), None)
+    if existing:
+        existing.description = description or existing.description
+        if workdir:
+            existing.workdir = workdir
+        if normalised:
+            existing.checklist = normalised
+        project_store.update_project(existing)
+        return f"Project '{name}' updated successfully."
+    else:
+        meta = project_store.create_project(name, description, workdir)
+        if normalised:
+            meta.checklist = normalised
+            project_store.update_project(meta)
+        return f"Project '{name}' created successfully."
+
+
+def _project_set_checklist_item(
+    project_name: str, item_text: str, done: bool,
+    project_store: "ProjectStore | None",
+) -> str:
+    if project_store is None:
+        return "Error: project store not available"
+    if not project_name or not item_text:
+        return "Error: project_name and item_text are required"
+    project = next(
+        (p for p in project_store.list_projects() if p.name.lower() == project_name.lower()),
+        None,
+    )
+    if project is None:
+        return f"Error: project '{project_name}' not found"
+    matched = False
+    for item in project.checklist:
+        if item.get("text", "").lower() == item_text.lower():
+            item["done"] = done
+            matched = True
+            break
+    if not matched:
+        # Item not found — add it
+        project.checklist.append({"text": item_text, "done": done})
+    project_store.update_project(project)
+    status = "done" if done else "not done"
+    action = "marked" if matched else "added and marked"
+    return f"Checklist item '{item_text}' {action} as {status} in project '{project_name}'."
 
 
 def _resolve_path(raw_path: str, cwd: str | None) -> Path:
@@ -454,6 +696,7 @@ def _run_command(command: str, cwd: str | None) -> str:
             capture_output=True,
             text=True,
             timeout=COMMAND_TIMEOUT_S,
+            **_NO_WINDOW,
         )
         parts: list[str] = []
         if result.stdout:

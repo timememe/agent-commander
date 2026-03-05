@@ -13,8 +13,8 @@ def main() -> None:
         os.environ.setdefault("AGENT_COMMANDER_APP_DIR", app_dir)
         os.environ.setdefault("AGENT_COMMANDER_FROZEN", "1")
 
-    # Set sys.argv so typer dispatches to the gui command.
-    sys.argv = [sys.argv[0], "gui"]
+    # Set sys.argv so typer dispatches to the gui command (Qt backend by default).
+    sys.argv = [sys.argv[0], "gui", "--backend", "qt"]
 
     from agent_commander.cli.commands import app
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import typer
@@ -257,7 +258,7 @@ def _build_proxy_server_manager(config: "Config"):
 @app.command()
 def gui(
     agent: str = typer.Option("", "--agent", help="Default agent (claude|gemini|codex)"),
-    backend: str = typer.Option("tk", "--backend", help="GUI backend: tk|qt"),
+    backend: str = typer.Option("qt", "--backend", help="GUI backend: qt|tk"),
 ) -> None:
     """Start Agent Commander desktop GUI."""
     from agent_commander.agent.loop import AgentLoop
@@ -361,6 +362,30 @@ def gui(
     _backend = (backend or "tk").strip().lower()
     if _backend == "qt":
         from agent_commander.gui_qt.channel import QtChannel
+        from agent_commander.config.loader import save_config as _save_config
+
+        _model_defaults: dict[str, str] = {
+            "claude": config.proxy_api.model_claude,
+            "gemini": config.proxy_api.model_gemini,
+            "codex": config.proxy_api.model_codex,
+        }
+
+        def _on_model_change(provider: str, model_id: str) -> None:
+            """Save selected model to config and update live provider."""
+            if provider == "claude":
+                config.proxy_api.model_claude = model_id
+            elif provider == "gemini":
+                config.proxy_api.model_gemini = model_id
+            elif provider == "codex":
+                config.proxy_api.model_codex = model_id
+            else:
+                return
+            _save_config(config)
+            # Update live provider if possible (takes effect immediately)
+            from agent_commander.providers.transport.proxy_session import ProxyAPIProvider
+            if isinstance(cli_provider, ProxyAPIProvider):
+                cli_provider._models[provider] = model_id
+
         gui_channel = QtChannel(
             bus=bus,
             default_cwd=default_cwd,
@@ -378,6 +403,8 @@ def gui(
             project_store=project_store,
             extension_store=extension_store,
             usage_monitors=usage_monitors,
+            on_model_change=_on_model_change,
+            model_defaults=_model_defaults,
         )
     elif _backend == "tk":
         from agent_commander.gui.channel import GUIChannel
@@ -412,6 +439,8 @@ def gui(
             model_gemini=config.proxy_api.model_gemini,
             model_codex=config.proxy_api.model_codex,
             extension_store=extension_store,
+            skill_store=skill_store,
+            project_store=project_store,
         )
     else:
         cli_provider = CLIAgentProvider(
@@ -495,6 +524,10 @@ def gui(
         if server_manager is not None:
             server_manager.stop(force=server_manager.is_managed())
     finally:
+        # If a restart was requested from the GUI, spawn a new process then exit.
+        if getattr(gui_channel, "_restart_requested", False):
+            import subprocess as _sp
+            _sp.Popen([sys.executable] + sys.argv)
         # Force-exit so no daemon threads or asyncio internals keep python.exe alive.
         os._exit(0)
 
