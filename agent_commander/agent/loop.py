@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -16,6 +16,10 @@ from agent_commander.providers.provider import CLIAgentProvider
 from agent_commander.providers.transport.proxy_session import ProxySession
 from agent_commander.providers.runtime.filter import filter_noise_lines
 from agent_commander.session.manager import SessionManager
+
+if TYPE_CHECKING:
+    from agent_commander.cron.service import CronService
+    from agent_commander.cron.types import CronJob
 
 StreamCallback = Callable[[InboundMessage, str, bool], Awaitable[None]]
 TerminalCallback = Callable[[InboundMessage, str, bool], Awaitable[None]]
@@ -40,6 +44,7 @@ class AgentLoop:
         terminal_callback: TerminalCallback | None = None,
         tool_start_callback: ToolStartCallback | None = None,
         tool_end_callback: ToolEndCallback | None = None,
+        cron_service: "CronService | None" = None,
     ) -> None:
         self.bus = bus
         self.workspace = workspace
@@ -49,6 +54,7 @@ class AgentLoop:
         self.terminal_callback = terminal_callback
         self.tool_start_callback = tool_start_callback
         self.tool_end_callback = tool_end_callback
+        self.cron_service = cron_service
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -58,6 +64,11 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the loop and process inbound messages."""
         self._running = True
+
+        # Wire cron job execution into the core loop.
+        if self.cron_service is not None:
+            self.cron_service.on_job = self._handle_cron_job
+
         logger.info("Agent loop started (CLI pass-through)")
 
         while self._running:
@@ -118,7 +129,8 @@ class AgentLoop:
                 return None
             active_ext_ids = list(metadata.get("active_extension_ids") or [])
             provider_session = ProxySession(
-                agent_key=agent_key, cwd=cwd, active_extension_ids=active_ext_ids
+                agent_key=agent_key, cwd=cwd, active_extension_ids=active_ext_ids,
+                session_id=origin_chat_id,
             )
             return await self._run_turn(
                 msg=msg,
@@ -298,6 +310,20 @@ class AgentLoop:
             except Exception:
                 pass
         self._agent_sessions.clear()
+
+    async def _handle_cron_job(self, job: "CronJob") -> str | None:
+        """Execute a cron job through the core loop (no GUI dependency)."""
+        session_id = (job.payload.channel or "").strip()
+        if not session_id:
+            logger.warning("Cron job '{}' has no channel/session_id — skipping", job.name)
+            return None
+        message = job.payload.message or "Run scheduled task."
+        return await self.process_direct(
+            content=message,
+            session_key=f"gui:{session_id}",
+            channel="gui",
+            chat_id=session_id,
+        )
 
     async def process_direct(
         self,

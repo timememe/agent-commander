@@ -52,6 +52,7 @@ class CronService:
         self._store: CronStore | None = None
         self._timer_task: asyncio.Task | None = None
         self._running = False
+        self._loop: asyncio.AbstractEventLoop | None = None
     
     def _load_store(self) -> CronStore:
         """Load jobs from disk."""
@@ -147,6 +148,7 @@ class CronService:
     async def start(self) -> None:
         """Start the cron service."""
         self._running = True
+        self._loop = asyncio.get_running_loop()
         self._load_store()
         self._recompute_next_runs()
         self._save_store()
@@ -161,13 +163,21 @@ class CronService:
             self._timer_task = None
     
     def _recompute_next_runs(self) -> None:
-        """Recompute next run times for all enabled jobs."""
+        """Recompute next run times for enabled jobs that need it.
+
+        Preserves saved ``next_run_at_ms`` when it is still in the future so
+        that an application restart does not reset every recurring timer.
+        """
         if not self._store:
             return
         now = _now_ms()
         for job in self._store.jobs:
-            if job.enabled:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+            if not job.enabled:
+                continue
+            # Keep the persisted value when it is still in the future.
+            if job.state.next_run_at_ms and job.state.next_run_at_ms > now:
+                continue
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
     
     def _get_next_wake_ms(self) -> int | None:
         """Get the earliest next run time across all jobs."""
@@ -178,23 +188,38 @@ class CronService:
         return min(times) if times else None
     
     def _arm_timer(self) -> None:
-        """Schedule the next timer tick."""
+        """Schedule the next timer tick.
+
+        Safe to call from any thread — uses the stored event loop reference
+        when called outside the asyncio thread.
+        """
         if self._timer_task:
             self._timer_task.cancel()
-        
+            self._timer_task = None
+
         next_wake = self._get_next_wake_ms()
         if not next_wake or not self._running:
             return
-        
+
         delay_ms = max(0, next_wake - _now_ms())
         delay_s = delay_ms / 1000
-        
+
         async def tick():
             await asyncio.sleep(delay_s)
             if self._running:
                 await self._on_timer()
-        
-        self._timer_task = asyncio.create_task(tick())
+
+        loop = self._loop
+        if loop is None:
+            return
+
+        try:
+            asyncio.get_running_loop()
+            # Called from the event-loop thread — create task directly.
+            self._timer_task = asyncio.create_task(tick())
+        except RuntimeError:
+            # Called from a worker thread — schedule onto the main loop.
+            asyncio.run_coroutine_threadsafe(tick(), loop)
     
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""

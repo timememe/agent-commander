@@ -20,6 +20,7 @@ from loguru import logger
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from agent_commander.cron.service import CronService
     from agent_commander.session.extension_store import ExtensionStore
     from agent_commander.session.skill_store import SkillStore
     from agent_commander.session.project_store import ProjectStore
@@ -32,6 +33,7 @@ class ProxySession:
     agent_key: str
     cwd: str | None = None
     active_extension_ids: list[str] = field(default_factory=list)
+    session_id: str | None = None
 
     @property
     def agent(self) -> "_ProxyAgent":
@@ -93,6 +95,7 @@ class ProxyAPIProvider:
         extension_store: "ExtensionStore | None" = None,
         skill_store: "SkillStore | None" = None,
         project_store: "ProjectStore | None" = None,
+        cron_service: "CronService | None" = None,
     ) -> None:
         self.base_url = (base_url or "http://127.0.0.1:8317").rstrip("/")
         self.api_key = (api_key or "").strip()
@@ -106,6 +109,7 @@ class ProxyAPIProvider:
         self._extension_store = extension_store
         self._skill_store = skill_store
         self._project_store = project_store
+        self._cron_service = cron_service
 
     # ── Public async interface ────────────────────────────────────────
 
@@ -183,7 +187,8 @@ class ProxyAPIProvider:
     ) -> None:
         """Multi-round agent loop: send request, execute tool calls, repeat."""
         from agent_commander.providers.tools.definitions import (
-            TOOL_DEFINITIONS, TEAM_PROJECT_TOOL_DEFINITIONS, execute_tool,
+            TOOL_DEFINITIONS, TEAM_PROJECT_TOOL_DEFINITIONS,
+            CRON_TOOL_DEFINITIONS, execute_tool,
         )
 
         model = self._select_model(session)
@@ -193,6 +198,8 @@ class ProxyAPIProvider:
         active_tools = list(TOOL_DEFINITIONS)
         if self._skill_store is not None or self._project_store is not None:
             active_tools = active_tools + TEAM_PROJECT_TOOL_DEFINITIONS
+        if self._cron_service is not None:
+            active_tools = active_tools + CRON_TOOL_DEFINITIONS
 
         for round_num in range(_MAX_TOOL_ROUNDS):
             result = self._single_request(
@@ -224,6 +231,8 @@ class ProxyAPIProvider:
                     active_extension_ids=session.active_extension_ids or None,
                     skill_store=self._skill_store,
                     project_store=self._project_store,
+                    cron_service=self._cron_service,
+                    session_id=getattr(session, "session_id", None),
                 )
 
                 event_q.put(("tool_end", {"id": tc.id, "name": tc.name, "result": tool_result}))

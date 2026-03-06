@@ -24,10 +24,18 @@ python -m nuitka `
     --include-package=pydantic_settings `
     --include-package=typer `
     --include-package=click `
-    --include-package=python_docx `
+    --include-package=docx `
     --include-package=openpyxl `
     --include-package=plyer `
     --noinclude-default-mode=nofollow `
+    --nofollow-import-to=contourpy `
+    --nofollow-import-to=matplotlib `
+    --nofollow-import-to=numpy `
+    --nofollow-import-to=PIL `
+    --nofollow-import-to=lxml `
+    --nofollow-import-to=pandas `
+    --nofollow-import-to=customtkinter `
+    --nofollow-import-to=tkinterdnd2 `
     --windows-icon-from-ico="$IconPath" `
     --assume-yes-for-downloads `
     "$EntryPoint"

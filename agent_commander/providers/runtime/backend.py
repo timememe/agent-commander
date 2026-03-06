@@ -181,6 +181,8 @@ class SubprocessFallbackBackend:
         del cols, rows
 
     def close(self) -> None:
+        import signal as _signal
+
         pid: int | None = getattr(self._proc, "pid", None)
         try:
             if self._proc.poll() is None:
@@ -189,12 +191,15 @@ class SubprocessFallbackBackend:
             pass
         if pid is not None:
             try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
-                    capture_output=True,
-                    timeout=3,
-                    **_NO_WINDOW,
-                )
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        capture_output=True,
+                        timeout=3,
+                        **_NO_WINDOW,
+                    )
+                else:
+                    os.kill(pid, _signal.SIGTERM)
             except Exception:
                 pass
 

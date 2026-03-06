@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Commander — Architecture Map</title>
+  <style>
+    :root {
+      --bg: #f4efe2;
+      --panel: rgba(255,252,246,0.92);
+      --ink: #18324a;
+      --muted: #5a6b79;
+      --line: #60798c;
+      --entry: #1f5fbf;
+      --ui: #0d8b64;
+      --core: #d36f19;
+      --runtime: #8247b3;
+      --data: #4a5c63;
+      --ops: #b03232;
+      --tool: #7a5935;
+      --shadow: 0 12px 32px rgba(24,50,74,0.10);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; color: var(--ink);
+      font-family: "Segoe UI","Trebuchet MS",sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(13,139,100,0.10), transparent 30%),
+        radial-gradient(circle at top right, rgba(31,95,191,0.08), transparent 26%),
+        linear-gradient(180deg, #f7f2e8, #f0eadc);
+    }
+    .page { max-width: 1720px; margin: 0 auto; padding: 24px 20px 60px; }
+    h1,h2,h3 { margin: 0; font-family: Georgia,"Times New Roman",serif; }
+    h1 { font-size: clamp(1.8rem,2.4vw,2.6rem); }
+    h2 { font-size: 1.35rem; margin-bottom: 6px; }
+    h3 { font-size: 1rem; }
+    p, li { margin: 0; color: var(--muted); line-height: 1.5; font-size: 0.93rem; }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid rgba(24,50,74,0.09);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+    }
+    .hero { padding: 22px 26px; margin-bottom: 18px; }
+    .hero p { margin-top: 8px; }
+    .panel { padding: 18px 20px; margin-top: 16px; }
+    .svg-wrap {
+      overflow-x: auto;
+      border-radius: 14px;
+      padding: 8px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.50), rgba(244,239,226,0.65)),
+        linear-gradient(90deg, rgba(24,50,74,0.035) 1px, transparent 1px),
+        linear-gradient(rgba(24,50,74,0.035) 1px, transparent 1px);
+      background-size: auto, 32px 32px, 32px 32px;
+    }
+    svg { width: 100%; height: auto; display: block; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px,1fr)); gap: 14px; }
+    .card {
+      padding: 14px 16px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.70);
+      border: 1px solid rgba(24,50,74,0.09);
+    }
+    .card h3 { margin-bottom: 4px; }
+    .path {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 4px 7px;
+      border-radius: 6px;
+      background: rgba(24,50,74,0.06);
+      font-family: Consolas,"Liberation Mono",monospace;
+      font-size: 0.82rem;
+      color: var(--ink);
+    }
+    .legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 4px; }
+    .legend-item {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 0.85rem; color: var(--muted);
+    }
+    .legend-dot {
+      width: 14px; height: 14px; border-radius: 4px;
+    }
+    .flow-list { padding-left: 0; list-style: none; }
+    .flow-list li {
+      padding: 8px 12px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.60);
+      border: 1px solid rgba(24,50,74,0.07);
+      margin-bottom: 8px;
+      font-family: Consolas,"Liberation Mono",monospace;
+      font-size: 0.85rem;
+      color: var(--ink);
+    }
+    .flow-list li strong { font-family: "Segoe UI",sans-serif; }
+    .dep-table {
+      width: 100%; border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    .dep-table th, .dep-table td {
+      text-align: left; padding: 6px 10px;
+      border-bottom: 1px solid rgba(24,50,74,0.08);
+    }
+    .dep-table th { color: var(--ink); font-weight: 600; }
+    .dep-table td { color: var(--muted); }
+    .tag {
+      display: inline-block; padding: 2px 8px; border-radius: 6px;
+      font-size: 0.78rem; font-weight: 600; color: #fff;
+    }
+    @media (max-width: 900px) {
+      .grid2 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+<!-- ===== HERO ===== -->
+<section class="hero">
+  <h1>Agent Commander — Architecture Map</h1>
+  <p>
+    Self-contained reference for the full system structure.
+    Verified against source on 2026-03-06.
+    Edit this file directly as architecture evolves — no build step required.
+  </p>
+  <div class="legend">
+    <span class="legend-item"><span class="legend-dot" style="background:var(--entry)"></span> Entry</span>
+    <span class="legend-item"><span class="legend-dot" style="background:var(--ui)"></span> GUI Layer</span>
+    <span class="legend-item"><span class="legend-dot" style="background:var(--core)"></span> Bus + Agent Core</span>
+    <span class="legend-item"><span class="legend-dot" style="background:var(--runtime)"></span> Providers / Runtime</span>
+    <span class="legend-item"><span class="legend-dot" style="background:var(--tool)"></span> Workspace</span>
+    <span class="legend-item"><span class="legend-dot" style="background:var(--data)"></span> Persistence + Config</span>
+    <span class="legend-item"><span class="legend-dot" style="background:var(--ops)"></span> Side Systems</span>
+  </div>
+</section>
+
+<!-- ===== MAIN SYSTEM MAP ===== -->
+<section class="panel">
+  <h2>System Map</h2>
+  <p>Subsystems, runtime relationships, and primary data flow.</p>
+  <div class="svg-wrap" style="margin-top:10px;">
+    <svg viewBox="0 0 1500 870" aria-label="System architecture diagram">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0 0 L10 5 L0 10z" fill="var(--line)"/>
+        </marker>
+        <marker id="ar-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0 0 L10 5 L0 10z" fill="var(--entry)"/>
+        </marker>
+        <marker id="ar-ret" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0 0 L10 5 L0 10z" fill="var(--ui)"/>
+        </marker>
+      </defs>
+
+      <!-- ── layer labels ── -->
+      <text x="750" y="28" text-anchor="middle" font-size="11" fill="var(--muted)" font-style="italic">
+        CLI bootstrap creates all components, then runs asyncio.run(run_stack())
+      </text>
+
+      <!-- ===== ROW 0: CLI BOOTSTRAP ===== -->
+      <rect x="440" y="38" width="620" height="58" rx="14" fill="var(--entry)"/>
+      <text x="750" y="64" text-anchor="middle" font-size="17" font-weight="700" fill="#fff">CLI Bootstrap</text>
+      <text x="750" y="82" text-anchor="middle" font-size="11" fill="#dde8ff">cli/commands.py — creates Config, Bus, Stores, Loop, Channel, Services, Provider</text>
+
+      <!-- ===== ROW 1: GUI + BUS + CORE + WORKSPACE ===== -->
+
+      <!-- Qt GUI -->
+      <rect x="20" y="140" width="340" height="260" rx="16" fill="var(--ui)"/>
+      <text x="40" y="168" font-size="17" font-weight="700" fill="#fff">Qt GUI Layer</text>
+      <text x="40" y="190" font-size="12" fill="#d0f5e8">QtChannel — gui_qt/channel.py</text>
+      <text x="40" y="208" font-size="11" fill="#d0f5e8">Bridge: async bus ↔ Qt thread (Signal + _run_on_ui)</text>
+      <text x="40" y="230" font-size="12" fill="#d0f5e8">QtApp — gui_qt/app.py</text>
+      <text x="40" y="248" font-size="11" fill="#d0f5e8">Main QMainWindow. Panels:</text>
+      <text x="40" y="268" font-size="11" fill="#b8e8d5">ChatPanel — streaming markdown bubbles</text>
+      <text x="40" y="284" font-size="11" fill="#b8e8d5">InputBar — multiline (Ctrl+Enter)</text>
+      <text x="40" y="300" font-size="11" fill="#b8e8d5">SessionListWidget — sidebar session cards</text>
+      <text x="40" y="316" font-size="11" fill="#b8e8d5">FileTrayPanel — workspace dir browser</text>
+      <text x="40" y="332" font-size="11" fill="#b8e8d5">SettingsPanel | ExtensionsPanel</text>
+      <text x="40" y="348" font-size="11" fill="#b8e8d5">TeamPanel | ProjectsPanel | CycleBar</text>
+      <text x="40" y="372" font-size="10" fill="#96d4bb">Also: legacy TK GUI (gui/*) — parallel path</text>
+
+      <!-- MessageBus -->
+      <rect x="400" y="170" width="220" height="110" rx="16" fill="var(--core)"/>
+      <text x="510" y="200" text-anchor="middle" font-size="17" font-weight="700" fill="#fff">MessageBus</text>
+      <text x="510" y="220" text-anchor="middle" font-size="11" fill="#ffe8d0">bus/queue.py + bus/events.py</text>
+      <text x="510" y="240" text-anchor="middle" font-size="11" fill="#ffe8d0">Async inbound/outbound queues</text>
+      <text x="510" y="258" text-anchor="middle" font-size="11" fill="#ffe8d0">dispatch_outbound() to subscribers</text>
+
+      <!-- Agent Core -->
+      <rect x="660" y="140" width="380" height="260" rx="16" fill="var(--core)"/>
+      <text x="680" y="168" font-size="17" font-weight="700" fill="#fff">Agent Core</text>
+      <text x="680" y="192" font-size="12" fill="#ffe8d0">AgentLoop — agent/loop.py</text>
+      <text x="680" y="210" font-size="11" fill="#ffe8d0">consume_inbound → _process_message → publish_outbound</text>
+      <text x="680" y="228" font-size="11" fill="#ffe8d0">Session routing, provider dispatch, stream callbacks</text>
+      <text x="680" y="248" font-size="11" fill="#ffe8d0">Loop-mode auto-responder, process_direct()</text>
+      <line x1="680" y1="258" x2="1020" y2="258" stroke="rgba(255,255,255,0.25)" stroke-width="1"/>
+      <text x="680" y="278" font-size="12" fill="#ffe8d0">ContextBuilder — agent/context.py</text>
+      <text x="680" y="296" font-size="11" fill="#ffe8d0">build_cli_turn_prompt(): identity + bootstrap + memory</text>
+      <text x="680" y="314" font-size="11" fill="#ffe8d0">+ skills summary + conversation history</text>
+      <line x1="680" y1="324" x2="1020" y2="324" stroke="rgba(255,255,255,0.25)" stroke-width="1"/>
+      <text x="680" y="342" font-size="12" fill="#ffe8d0">MemoryStore — agent/memory.py</text>
+      <text x="680" y="358" font-size="11" fill="#ffe8d0">MEMORY.md + daily YYYY-MM-DD.md notes</text>
+      <text x="680" y="376" font-size="12" fill="#ffe8d0">SkillsLoader — agent/skills.py</text>
+      <text x="680" y="392" font-size="11" fill="#ffe8d0">Workspace skills (YAML frontmatter, lazy load)</text>
+
+      <!-- Workspace Files -->
+      <rect x="1090" y="170" width="280" height="110" rx="16" fill="var(--tool)"/>
+      <text x="1110" y="198" font-size="17" font-weight="700" fill="#fff">Workspace</text>
+      <text x="1110" y="218" font-size="11" fill="#ffe4cc">~/.agent-commander/workspace/</text>
+      <text x="1110" y="236" font-size="11" fill="#ffe4cc">AGENTS.md | SOUL.md | USER.md</text>
+      <text x="1110" y="254" font-size="11" fill="#ffe4cc">TOOLS.md | IDENTITY.md</text>
+      <text x="1110" y="272" font-size="11" fill="#ffe4cc">memory/ | skills/ | HEARTBEAT.md</text>
+
+      <!-- ===== ROW 1 ARROWS: main data flow ===== -->
+
+      <!-- FORWARD (inbound): QtGUI → Bus → Core -->
+      <path d="M 360 220 L 400 220" fill="none" stroke="var(--entry)" stroke-width="2.5" marker-end="url(#ar-blue)"/>
+      <path d="M 620 220 L 660 220" fill="none" stroke="var(--entry)" stroke-width="2.5" marker-end="url(#ar-blue)"/>
+      <text x="380" y="213" text-anchor="middle" font-size="9" fill="var(--entry)" font-weight="600">inbound</text>
+
+      <!-- RETURN (outbound): Core → Bus → QtGUI -->
+      <path d="M 660 250 L 620 250" fill="none" stroke="var(--ui)" stroke-width="2.5" marker-end="url(#ar-ret)"/>
+      <path d="M 400 250 L 360 250" fill="none" stroke="var(--ui)" stroke-width="2.5" marker-end="url(#ar-ret)"/>
+      <text x="380" y="266" text-anchor="middle" font-size="9" fill="var(--ui)" font-weight="600">outbound</text>
+      <text x="640" y="213" text-anchor="middle" font-size="9" fill="var(--entry)" font-weight="600">consume</text>
+      <text x="640" y="266" text-anchor="middle" font-size="9" fill="var(--ui)" font-weight="600">publish</text>
+
+      <!-- Workspace → Core -->
+      <path d="M 1090 225 L 1042 225" fill="none" stroke="var(--tool)" stroke-width="2" marker-end="url(#ar)"/>
+      <text x="1066" y="218" text-anchor="middle" font-size="9" fill="var(--tool)">reads</text>
+
+      <!-- ===== ROW 2: PROVIDER LAYER ===== -->
+
+      <!-- Provider layer background -->
+      <rect x="100" y="440" width="920" height="240" rx="20" fill="rgba(130,71,179,0.06)" stroke="rgba(130,71,179,0.15)" stroke-width="1"/>
+      <text x="120" y="462" font-size="12" font-weight="600" fill="var(--runtime)">Provider Layer — config.proxy_api.enabled selects transport</text>
+
+      <!-- PTY Provider path -->
+      <rect x="120" y="475" width="380" height="190" rx="14" fill="var(--runtime)"/>
+      <text x="140" y="502" font-size="16" font-weight="700" fill="#fff">PTY Path (direct CLI)</text>
+      <text x="140" y="522" font-size="12" fill="#e8d5ff">CLIAgentProvider — providers/provider.py</text>
+      <text x="140" y="540" font-size="11" fill="#e8d5ff">send_and_receive(): poll snapshot, extract response</text>
+      <line x1="140" y1="550" x2="480" y2="550" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+      <text x="140" y="568" font-size="12" fill="#e8d5ff">AgentSession — runtime/session.py</text>
+      <text x="140" y="586" font-size="11" fill="#e8d5ff">PTY lifecycle, prompt detection, snapshots</text>
+      <text x="140" y="604" font-size="12" fill="#e8d5ff">PTYBackend — runtime/backend.py</text>
+      <text x="140" y="622" font-size="11" fill="#e8d5ff">Unix: pexpect | Win: pywinpty | Fallback: Popen</text>
+      <text x="140" y="644" font-size="11" fill="#d0bbee">+ Registry (agent defs) | Markers (state detect) | Filter (noise strip)</text>
+
+      <!-- Proxy Provider path -->
+      <rect x="530" y="475" width="470" height="190" rx="14" fill="var(--runtime)"/>
+      <text x="550" y="502" font-size="16" font-weight="700" fill="#fff">Proxy Path (HTTP + tools)</text>
+      <text x="550" y="522" font-size="12" fill="#e8d5ff">ProxyAPIProvider — transport/proxy_session.py</text>
+      <text x="550" y="540" font-size="11" fill="#e8d5ff">OpenAI-compatible SSE stream + multi-round tool loop</text>
+      <line x1="550" y1="550" x2="980" y2="550" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+      <text x="550" y="568" font-size="12" fill="#e8d5ff">ProxyServerManager — transport/proxy_server.py</text>
+      <text x="550" y="586" font-size="11" fill="#e8d5ff">CLIProxyAPI binary lifecycle, health check, OAuth</text>
+      <text x="550" y="604" font-size="12" fill="#e8d5ff">ToolExecutor — providers/tools/definitions.py</text>
+      <text x="550" y="622" font-size="11" fill="#e8d5ff">file I/O, shell, glob, grep, web_fetch, docx/xlsx/pptx</text>
+      <text x="550" y="644" font-size="11" fill="#d0bbee">+ email (tools/email.py) | calendar (tools/calendar.py) | team/project CRUD</text>
+
+      <!-- Core → Providers arrows -->
+      <path d="M 780 400 C 780 430, 400 430, 310 475" fill="none" stroke="var(--runtime)" stroke-width="2.5" marker-end="url(#ar)"/>
+      <path d="M 870 400 C 870 430, 765 430, 765 475" fill="none" stroke="var(--runtime)" stroke-width="2.5" marker-end="url(#ar)"/>
+      <text x="540" y="435" font-size="10" fill="var(--runtime)" font-weight="600">provider.send_and_receive()</text>
+
+      <!-- ===== ROW 3: PERSISTENCE + CONFIG + SIDE SYSTEMS ===== -->
+
+      <!-- Persistence -->
+      <rect x="20" y="730" width="660" height="100" rx="16" fill="var(--data)"/>
+      <text x="40" y="758" font-size="16" font-weight="700" fill="#fff">Persistence Layer</text>
+      <text x="40" y="778" font-size="12" fill="#dde5e9">GUIStore — session/gui_store.py — index.json + {id}.jsonl + agent cache dirs</text>
+      <text x="40" y="796" font-size="12" fill="#dde5e9">SkillStore — session/skill_store.py | ProjectStore — session/project_store.py</text>
+      <text x="40" y="814" font-size="12" fill="#dde5e9">ExtensionStore — session/extension_store.py | SessionManager — session/manager.py (legacy)</text>
+
+      <!-- Config -->
+      <rect x="710" y="730" width="250" height="100" rx="16" fill="var(--data)"/>
+      <text x="730" y="758" font-size="16" font-weight="700" fill="#fff">Config</text>
+      <text x="730" y="778" font-size="12" fill="#dde5e9">config/schema.py — Pydantic models</text>
+      <text x="730" y="796" font-size="12" fill="#dde5e9">config/loader.py — load/save/migrate</text>
+      <text x="730" y="814" font-size="11" fill="#c0ccd2">~/.agent-commander/config.json</text>
+
+      <!-- Side Systems -->
+      <rect x="990" y="730" width="380" height="100" rx="16" fill="var(--ops)"/>
+      <text x="1010" y="758" font-size="16" font-weight="700" fill="#fff">Side Systems</text>
+      <text x="1010" y="778" font-size="12" fill="#ffd8d8">CronService — cron/service.py — scheduled agent messages</text>
+      <text x="1010" y="796" font-size="12" fill="#ffd8d8">HeartbeatService — heartbeat/service.py — HEARTBEAT.md check</text>
+      <text x="1010" y="814" font-size="12" fill="#ffd8d8">UsageMonitor — usage/monitor.py — rate-limit probes</text>
+
+      <!-- Persistence ↔ GUI arrow -->
+      <path d="M 180 400 L 180 730" fill="none" stroke="var(--data)" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#ar)"/>
+      <text x="188" y="560" font-size="9" fill="var(--data)">session</text>
+      <text x="188" y="572" font-size="9" fill="var(--data)">save/load</text>
+
+      <!-- Proxy → Persistence arrow (tool CRUD) -->
+      <path d="M 680 665 C 680 700, 500 700, 500 730" fill="none" stroke="var(--data)" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#ar)"/>
+      <text x="610" y="705" font-size="9" fill="var(--data)">tool CRUD (stores)</text>
+
+      <!-- Side Systems → Bus arrow -->
+      <path d="M 1090 730 C 1090 700, 560 700, 560 280" fill="none" stroke="var(--ops)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+      <text x="820" y="698" font-size="9" fill="var(--ops)">CronService → publish_inbound (scheduled messages)</text>
+
+      <!-- Side Systems → GUI arrow (usage) -->
+      <path d="M 1200 730 C 1200 695, 1400 695, 1400 440 C 1400 300, 360 390, 340 400" fill="none" stroke="var(--ops)" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#ar)"/>
+      <text x="1330" y="538" font-size="9" fill="var(--ops)">UsageMonitor</text>
+      <text x="1330" y="550" font-size="9" fill="var(--ops)">→ status bar</text>
+
+      <!-- Stream callback: direct from Loop to GUI (bypasses bus for streaming) -->
+      <path d="M 660 180 C 500 140, 400 140, 320 140" fill="none" stroke="var(--ui)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ar-ret)"/>
+      <text x="490" y="136" font-size="9" fill="var(--ui)">stream_callback → emit_stream_chunk (live streaming, bypasses bus)</text>
+
+    </svg>
+  </div>
+</section>
+
+<!-- ===== DATA FLOW ===== -->
+<div class="grid2">
+  <section class="panel">
+    <h2>Primary Data Flow</h2>
+    <p>The main request-response cycle, traced through actual function calls.</p>
+    <ol class="flow-list" style="margin-top:10px; padding-left:0; list-style:none; counter-reset:step;">
+      <li><strong>1.</strong> User types in <code>InputBar</code> → <code>QtApp._on_send()</code></li>
+      <li><strong>2.</strong> <code>QtChannel.on_user_input()</code> → <code>Bus.publish_inbound(InboundMessage)</code></li>
+      <li><strong>3.</strong> <code>AgentLoop.run()</code> → <code>bus.consume_inbound()</code> → <code>_process_message(msg)</code></li>
+      <li><strong>4.</strong> <code>ContextBuilder.build_cli_turn_prompt()</code> assembles:
+        identity + bootstrap files + memory + skills summary + history</li>
+      <li><strong>5a.</strong> <strong>PTY mode:</strong> <code>CLIAgentProvider.send_and_receive()</code> →
+        <code>AgentSession</code> → PTY write → poll snapshots → extract response</li>
+      <li><strong>5b.</strong> <strong>Proxy mode:</strong> <code>ProxyAPIProvider.send_and_receive()</code> →
+        HTTP SSE stream → tool-call loop → <code>execute_tool()</code> → yield chunks</li>
+      <li><strong>6.</strong> Chunks → <code>stream_callback</code> → <code>QtChannel.emit_stream_chunk()</code> →
+        <code>QtApp.receive_assistant_chunk()</code> → <code>ChatPanel</code> (live)</li>
+      <li><strong>7.</strong> Final response → <code>Bus.publish_outbound(OutboundMessage)</code> →
+        <code>dispatch_outbound()</code> → <code>QtChannel.send()</code></li>
+      <li><strong>8.</strong> <code>GUIStore.append_message()</code> persists to JSONL</li>
+    </ol>
+  </section>
+
+  <section class="panel">
+    <h2>Side System Flows</h2>
+    <p>Background services that inject messages or update UI.</p>
+    <ul class="flow-list" style="margin-top:10px;">
+      <li><strong>CronService</strong> — async timer evaluates due jobs →
+        <code>Bus.publish_inbound()</code> with scheduled message →
+        AgentLoop processes like any user message</li>
+      <li><strong>HeartbeatService</strong> — reads <code>HEARTBEAT.md</code>,
+        if non-empty → <code>AgentLoop.process_direct()</code>
+        (bypasses bus, direct turn)</li>
+      <li><strong>UsageMonitor</strong> — polls agent CLI for rate-limit data
+        (codex TUI status, claude/gemini startup banner) →
+        <code>on_update</code> callback → <code>QtApp.update_usage()</code> →
+        status bar display</li>
+      <li><strong>Cycle Mode</strong> — <code>QTimer</code> in QtApp fires
+        <code>_on_cycle_tick()</code> → publishes continuation message to bus →
+        creates agent-in-loop behavior</li>
+    </ul>
+    <h2 style="margin-top:14px;">Transport Selection</h2>
+    <p style="margin-top:4px;">
+      Set in <code>config.json → proxyApi.enabled</code>.<br>
+      <strong>PTY (default)</strong>: direct terminal session per CLI agent. Best for local dev.<br>
+      <strong>Proxy</strong>: HTTP SSE via CLIProxyAPI binary. Enables tool calling,
+      model selection, multi-provider routing. Required for document/email/calendar tools.
+    </p>
+  </section>
+</div>
+
+<!-- ===== MODULE INDEX ===== -->
+<section class="panel">
+  <h2>Module Index</h2>
+  <p>Every Python module in the project, grouped by subsystem.</p>
+  <div class="grid3" style="margin-top:12px;">
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--entry)">entry</span> CLI Bootstrap</h3>
+      <p>Typer app. <code>gui</code> command creates all runtime objects and runs
+        <code>asyncio.run(run_stack())</code>. Also: <code>onboard</code>, <code>status</code>,
+        <code>heartbeat</code> commands.</p>
+      <span class="path">cli/commands.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--ui)">gui</span> QtChannel</h3>
+      <p>Bridge between async MessageBus and Qt GUI thread. Runs QtApp in a
+        <code>threading.Thread</code>. Emits stream chunks, tool events, outbound messages
+        into the UI via <code>_run_on_ui()</code>.</p>
+      <span class="path">gui_qt/channel.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--ui)">gui</span> QtApp</h3>
+      <p>Main QMainWindow. Thread-safe via <code>Signal(object)</code>. Manages session
+        lifecycle, panel switching, cycle mode timer, usage display. 8 panels.</p>
+      <span class="path">gui_qt/app.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--ui)">gui</span> Qt Panels</h3>
+      <p>ChatPanel (streaming markdown), InputBar (Ctrl+Enter), SessionListWidget,
+        FileTrayPanel, SettingsPanel, ExtensionsPanel, TeamPanel, ProjectsPanel,
+        CycleControlBar, NewSessionDialog.</p>
+      <span class="path">gui_qt/chat_panel.py</span>
+      <span class="path">gui_qt/input_bar.py</span>
+      <span class="path">gui_qt/session_list.py</span>
+      <span class="path">gui_qt/*.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--ui)">gui</span> Legacy TK GUI</h3>
+      <p>Parallel desktop path (customtkinter). Same channel interface.
+        Still carries schedule dialog and terminal panel. Being superseded by Qt.</p>
+      <span class="path">gui/app.py</span>
+      <span class="path">gui/channel.py</span>
+      <span class="path">gui/*.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--core)">bus</span> MessageBus</h3>
+      <p>Two async queues (inbound + outbound). Channels subscribe to outbound via
+        <code>subscribe_outbound()</code>. Background task <code>dispatch_outbound()</code>
+        fans out to subscribers.</p>
+      <span class="path">bus/queue.py</span>
+      <span class="path">bus/events.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--core)">core</span> AgentLoop</h3>
+      <p>Main processing loop. Consumes inbound, builds prompt via ContextBuilder,
+        dispatches to provider, streams response back. Handles loop-mode auto-responder
+        and <code>process_direct()</code> for headless turns.</p>
+      <span class="path">agent/loop.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--core)">core</span> ContextBuilder</h3>
+      <p>Assembles <code>build_cli_turn_prompt()</code>: runtime identity + bootstrap
+        files (AGENTS, SOUL, USER, TOOLS) + MemoryStore context + SkillsLoader summary
+        + conversation history.</p>
+      <span class="path">agent/context.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--core)">core</span> Memory + Skills</h3>
+      <p><strong>MemoryStore</strong>: reads MEMORY.md + daily notes, returns formatted block.
+        <strong>SkillsLoader</strong>: discovers workspace skills with YAML frontmatter,
+        builds XML summary for progressive loading.</p>
+      <span class="path">agent/memory.py</span>
+      <span class="path">agent/skills.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--runtime)">pty</span> CLIAgentProvider</h3>
+      <p>PTY-based provider. Sends message to AgentSession, polls terminal snapshots
+        for completion, extracts clean response. Special Gemini fallback
+        (non-interactive mode per turn).</p>
+      <span class="path">providers/provider.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--runtime)">pty</span> AgentSession + PTYBackend</h3>
+      <p><strong>AgentSession</strong>: PTY lifecycle, prompt detection, startup-prompt handling
+        (Codex update, Claude trust), snapshot extraction via pyte.
+        <strong>PTYBackend</strong>: platform factory — pexpect (Unix), pywinpty (Win), Popen fallback.</p>
+      <span class="path">providers/runtime/session.py</span>
+      <span class="path">providers/runtime/backend.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--runtime)">pty</span> Registry + Markers + Filter</h3>
+      <p><strong>Registry</strong>: AGENT_DEFS dict (claude, gemini, codex) with commands and prompt patterns.
+        <strong>Markers</strong>: TerminalState enum + per-agent status/extraction functions.
+        <strong>Filter</strong>: regex noise removal (spinners, TUI chrome, box-drawing).</p>
+      <span class="path">providers/runtime/registry.py</span>
+      <span class="path">providers/runtime/markers.py</span>
+      <span class="path">providers/runtime/filter.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--runtime)">proxy</span> ProxyAPIProvider</h3>
+      <p>HTTP SSE streaming to CLIProxyAPI-compatible endpoint. Multi-round
+        <code>_agent_loop()</code> with tool-call dispatch. Yields response chunks as
+        async generator.</p>
+      <span class="path">providers/transport/proxy_session.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--runtime)">proxy</span> ProxyServerManager</h3>
+      <p>CLIProxyAPI binary lifecycle: start/stop/restart, health check (GET /v1/models),
+        OAuth login flow, provider auth snapshot, Codex CLI login check.</p>
+      <span class="path">providers/transport/proxy_server.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--runtime)">proxy</span> Tool Executor</h3>
+      <p>~20 tool definitions for ProxyAPI mode. File I/O, shell, glob, grep, web_fetch,
+        docx/xlsx/pptx, email, calendar, team role CRUD, project CRUD.
+        Dispatched by <code>execute_tool(name, args)</code>.</p>
+      <span class="path">providers/tools/definitions.py</span>
+      <span class="path">providers/tools/email.py</span>
+      <span class="path">providers/tools/calendar.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--data)">persist</span> GUIStore</h3>
+      <p>Two-tier cache: main (index.json + per-session JSONL) and agent cache
+        (meta.json + context.md per session). Manages SessionMeta, StoredMessage,
+        LoopState, ScheduleDef.</p>
+      <span class="path">session/gui_store.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--data)">persist</span> Feature Stores</h3>
+      <p><strong>SkillStore</strong>: reusable team roles/personas with CRUD.
+        <strong>ProjectStore</strong>: project groups with checklists and shared context.
+        <strong>ExtensionStore</strong>: external integrations (Google OAuth, Yandex, custom) with credential management.</p>
+      <span class="path">session/skill_store.py</span>
+      <span class="path">session/project_store.py</span>
+      <span class="path">session/extension_store.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--data)">persist</span> SessionManager (legacy)</h3>
+      <p>Original JSONL-based conversation history. Session objects with message lists.
+        Still used by AgentLoop for context reuse. Gradually being replaced by GUIStore.</p>
+      <span class="path">session/manager.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--data)">config</span> Config</h3>
+      <p>Pydantic schema: Config → AgentsConfig (per-agent enabled/command/workdir),
+        GUIConfig (theme/size), ProxyAPIConfig (enabled/models/binary).
+        Loader: load/save with snake↔camel migration.</p>
+      <span class="path">config/schema.py</span>
+      <span class="path">config/loader.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--ops)">side</span> CronService</h3>
+      <p>Persistent scheduled jobs (cron.json). Supports "at", "every", "cron" schedule kinds.
+        Async timer fires <code>_execute_job()</code> → publishes InboundMessage to bus.
+        Orphan job cleanup on startup.</p>
+      <span class="path">cron/service.py</span>
+      <span class="path">cron/types.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--ops)">side</span> HeartbeatService</h3>
+      <p>Periodic check: reads HEARTBEAT.md → if non-empty, triggers agent turn via
+        callback → <code>AgentLoop.process_direct()</code>. Manual trigger via CLI
+        <code>heartbeat</code> command.</p>
+      <span class="path">heartbeat/service.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--ops)">side</span> UsageMonitor</h3>
+      <p>Background poller per agent. Probes: codex (TUI status bar → quota%),
+        claude (startup splash → plan label), gemini (banner → plan label).
+        Fires <code>on_update</code>/<code>on_notify</code> callbacks. Depletion threshold: 10%.</p>
+      <span class="path">usage/monitor.py</span>
+      <span class="path">usage/models.py</span>
+      <span class="path">usage/codex_probe.py</span>
+      <span class="path">usage/claude_probe.py</span>
+      <span class="path">usage/gemini_probe.py</span>
+    </article>
+
+    <article class="card">
+      <h3><span class="tag" style="background:var(--runtime)">misc</span> Capabilities + Helpers</h3>
+      <p><strong>capabilities.py</strong>: PLATFORM_CONTEXT string (bundled packages list).
+        <strong>utils/helpers.py</strong>: path helpers, safe_filename, ensure_dir.
+        <strong>utils/notifications.py</strong>: OS-level toast notifications.</p>
+      <span class="path">providers/capabilities.py</span>
+      <span class="path">utils/helpers.py</span>
+      <span class="path">utils/notifications.py</span>
+    </article>
+
+  </div>
+</section>
+
+<!-- ===== DEPENDENCY TABLE ===== -->
+<section class="panel">
+  <h2>Internal Dependency Map</h2>
+  <p>Which modules import from which. Only intra-project dependencies shown.</p>
+  <div style="overflow-x:auto; margin-top:10px;">
+    <table class="dep-table">
+      <thead>
+        <tr><th>Module</th><th>Depends on (imports from agent_commander.*)</th><th>Depended on by</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>cli/commands.py</strong></td>
+          <td>config.loader, config.schema, bus.queue, agent.loop, providers.provider,
+            providers.transport.*, providers.runtime.registry, session.*, cron.service,
+            heartbeat.service, usage.monitor, gui_qt.channel, gui.channel, utils.*</td>
+          <td>__main__ (entry point)</td>
+        </tr>
+        <tr>
+          <td><strong>gui_qt/channel.py</strong></td>
+          <td>bus.events, bus.queue, session.gui_store, gui_qt.app, gui_qt.theme</td>
+          <td>cli/commands.py</td>
+        </tr>
+        <tr>
+          <td><strong>gui_qt/app.py</strong></td>
+          <td>gui_qt.* (panels, theme), session.gui_store, session.skill_store,
+            session.project_store, session.extension_store, usage.models</td>
+          <td>gui_qt/channel.py</td>
+        </tr>
+        <tr>
+          <td><strong>agent/loop.py</strong></td>
+          <td>agent.context, bus.events, bus.queue, providers.provider,
+            providers.transport.proxy_session, providers.runtime.session,
+            providers.runtime.filter, session.manager</td>
+          <td>cli/commands.py</td>
+        </tr>
+        <tr>
+          <td><strong>agent/context.py</strong></td>
+          <td>agent.memory, agent.skills</td>
+          <td>agent/loop.py</td>
+        </tr>
+        <tr>
+          <td><strong>providers/provider.py</strong></td>
+          <td>providers.runtime.markers, providers.runtime.filter</td>
+          <td>agent/loop.py, cli/commands.py</td>
+        </tr>
+        <tr>
+          <td><strong>providers/runtime/session.py</strong></td>
+          <td>providers.runtime.registry, providers.runtime.markers, providers.runtime.backend</td>
+          <td>providers/provider.py, agent/loop.py</td>
+        </tr>
+        <tr>
+          <td><strong>providers/transport/proxy_session.py</strong></td>
+          <td>providers.tools.definitions, session.extension_store, session.skill_store, session.project_store</td>
+          <td>agent/loop.py, cli/commands.py</td>
+        </tr>
+        <tr>
+          <td><strong>providers/tools/definitions.py</strong></td>
+          <td>providers.tools.email, providers.tools.calendar, session.extension_store,
+            session.skill_store, session.project_store</td>
+          <td>providers/transport/proxy_session.py</td>
+        </tr>
+        <tr>
+          <td><strong>cron/service.py</strong></td>
+          <td>cron.types</td>
+          <td>cli/commands.py</td>
+        </tr>
+        <tr>
+          <td><strong>usage/monitor.py</strong></td>
+          <td>usage.models, usage.codex_probe, usage.claude_probe, usage.gemini_probe</td>
+          <td>cli/commands.py</td>
+        </tr>
+        <tr>
+          <td><strong>bus/events.py, bus/queue.py</strong></td>
+          <td>(none — leaf modules)</td>
+          <td>agent/loop.py, gui_qt/channel.py, cli/commands.py</td>
+        </tr>
+        <tr>
+          <td><strong>config/schema.py, config/loader.py</strong></td>
+          <td>schema → pydantic; loader → schema, utils.helpers</td>
+          <td>cli/commands.py</td>
+        </tr>
+        <tr>
+          <td><strong>session/*.py (stores)</strong></td>
+          <td>(none — leaf modules, JSON I/O only)</td>
+          <td>cli/commands.py, gui_qt/*, providers/tools/*, providers/transport/*</td>
+        </tr>
+        <tr>
+          <td><strong>providers/runtime/backend.py</strong></td>
+          <td>(none — platform libs only)</td>
+          <td>providers/runtime/session.py</td>
+        </tr>
+        <tr>
+          <td><strong>providers/runtime/registry.py</strong></td>
+          <td>(none — dataclasses)</td>
+          <td>providers/runtime/session.py, cli/commands.py</td>
+        </tr>
+        <tr>
+          <td><strong>providers/runtime/markers.py</strong></td>
+          <td>(none — regex + enum)</td>
+          <td>providers/runtime/session.py, providers/provider.py</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ===== ARCHITECTURE NOTES ===== -->
+<section class="panel">
+  <h2>Architecture Notes</h2>
+  <div class="grid2" style="margin-top:10px;">
+    <div class="card">
+      <h3>Key Design Decisions</h3>
+      <ul style="padding-left:18px; margin:6px 0 0;">
+        <li><strong>Bus decoupling</strong>: MessageBus allows any channel (Qt, TK, future API) to plug in without changing agent core</li>
+        <li><strong>Dual transport</strong>: PTY mode for simple local use, Proxy mode for full tool support — selected per-config, not per-session</li>
+        <li><strong>Thread bridge</strong>: Qt runs in its own thread; all async→Qt calls go through <code>Signal(object) + _run_on_ui()</code></li>
+        <li><strong>Streaming</strong>: live chunks go via direct <code>stream_callback</code> (bypasses bus for low latency); final response goes via bus</li>
+        <li><strong>Context assembly</strong>: progressive — identity first, then bootstrap files, then memory, then skill summaries (full skills loaded on demand)</li>
+        <li><strong>Session persistence</strong>: two separate systems — GUIStore (UI cache, JSONL) and SessionManager (agent-loop history). Both active.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Known Tensions / TODOs</h3>
+      <ul style="padding-left:18px; margin:6px 0 0;">
+        <li><strong>Dual session stores</strong>: GUIStore and SessionManager overlap — conversation lives in both. Needs unification.</li>
+        <li><strong>Time system split</strong>: CronService (async timer), HeartbeatService (async sleep), Cycle Mode (QTimer in UI) — three independent timing sources targeting the same bus.</li>
+        <li><strong>No mid-session agent switching</strong>: agent is fixed at session creation. Switching requires new session.</li>
+        <li><strong>ExtensionsPanel</strong>: partially implemented (Google OAuth works, others stub).</li>
+        <li><strong>Legacy TK GUI</strong>: still present, shares channel interface but has diverged in features.</li>
+        <li><strong>Transport per-config not per-session</strong>: all sessions use the same provider. Would be useful to mix PTY + Proxy.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===== FILE TREE ===== -->
+<section class="panel">
+  <h2>File Tree</h2>
+  <pre style="font-size:0.82rem; line-height:1.45; color:var(--ink); overflow-x:auto; margin:8px 0 0;">
+agent_commander/
+  __init__.py, __main__.py
+  cli/
+    commands.py ............. CLI entry (typer): gui, onboard, status, heartbeat
+  bus/
+    events.py ............... InboundMessage, OutboundMessage dataclasses
+    queue.py ................ MessageBus: async inbound/outbound queues + dispatch
+  agent/
+    loop.py ................. AgentLoop: consume → process → publish
+    context.py .............. ContextBuilder: prompt assembly
+    memory.py ............... MemoryStore: MEMORY.md + daily notes
+    skills.py ............... SkillsLoader: workspace skills with YAML frontmatter
+  providers/
+    provider.py ............. CLIAgentProvider (PTY snapshot-based)
+    capabilities.py ......... PLATFORM_CONTEXT constant
+    runtime/
+      session.py ............ AgentSession: PTY lifecycle + prompt detection
+      backend.py ............ PTYBackend: pexpect / pywinpty / Popen
+      registry.py ........... AGENT_DEFS: claude, gemini, codex definitions
+      markers.py ............ TerminalState enum + per-agent extraction
+      filter.py ............. Noise line filtering (spinners, TUI chrome)
+    transport/
+      proxy_session.py ...... ProxyAPIProvider: HTTP SSE + tool-call loop
+      proxy_server.py ....... ProxyServerManager: CLIProxyAPI binary lifecycle
+    tools/
+      definitions.py ........ ~20 tool defs + execute_tool dispatcher
+      email.py .............. Email tool (SMTP/IMAP via extensions)
+      calendar.py ........... Calendar tool (Google Calendar API)
+  session/
+    gui_store.py ............ GUIStore: two-tier session cache (index + JSONL)
+    manager.py .............. SessionManager: legacy conversation history
+    skill_store.py .......... SkillStore: reusable team roles CRUD
+    project_store.py ........ ProjectStore: project groups + checklists
+    extension_store.py ...... ExtensionStore: external integrations + credentials
+  config/
+    schema.py ............... Pydantic config models
+    loader.py ............... Load/save/migrate config.json
+  gui_qt/
+    app.py .................. QtApp: main QMainWindow
+    channel.py .............. QtChannel: async bus ↔ Qt thread bridge
+    chat_panel.py ........... ChatPanel: streaming markdown bubbles
+    input_bar.py ............ InputBar: multiline input
+    session_list.py ......... SessionListWidget: sidebar cards
+    file_tray.py ............ FileTrayPanel: workspace browser
+    settings_panel.py ....... SettingsPanel: config UI
+    extensions_panel.py ..... ExtensionsPanel: auth integrations
+    team_panel.py ........... TeamPanel: role management
+    projects_panel.py ....... ProjectsPanel: project management
+    cycle_bar.py ............ CycleControlBar: loop mode controls
+    new_session_dialog.py ... NewSessionDialog
+    theme.py ................ 23 color constants + global QSS
+  gui/ ...................... Legacy TK GUI (parallel path, being superseded)
+  cron/
+    service.py .............. CronService: scheduled job execution
+    types.py ................ CronJob, CronSchedule, CronPayload dataclasses
+  heartbeat/
+    service.py .............. HeartbeatService: periodic HEARTBEAT.md check
+  usage/
+    monitor.py .............. UsageMonitor: background rate-limit poller
+    models.py ............... RateWindow, AgentUsageSnapshot
+    codex_probe.py .......... Codex CLI quota probe
+    claude_probe.py ......... Claude CLI plan probe
+    gemini_probe.py ......... Gemini CLI plan probe
+  utils/
+    helpers.py .............. Path helpers, safe_filename, ensure_dir
+    notifications.py ........ OS toast notifications
+</pre>
+</section>
+
+<p style="text-align:center; margin-top:20px; font-size:0.82rem; color:var(--muted);">
+  Last verified: 2026-03-06 &nbsp;|&nbsp; 27 modules, ~90 Python files &nbsp;|&nbsp; Edit this HTML directly to keep it current
+</p>
+
+</div>
+</body>
+</html>

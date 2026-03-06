@@ -17,7 +17,6 @@ from agent_commander.session.skill_store import SkillStore
 
 if TYPE_CHECKING:
     from agent_commander.cron.service import CronService
-    from agent_commander.cron.types import CronJob
     from agent_commander.session.project_store import ProjectStore
     from agent_commander.usage.monitor import UsageMonitor
 
@@ -86,31 +85,11 @@ class GUIChannel:
         self._loop = asyncio.get_running_loop()
         self._stopped.clear()
 
-        # Register cron job callback if service is available
-        if self.cron_service is not None:
-            self.cron_service.on_job = self._handle_cron_job
-
         self._thread = threading.Thread(target=self._run_gui, daemon=True, name="agent-commander-gui")
         self._thread.start()
 
         while not self._stopped.is_set():
             await asyncio.sleep(0.2)
-
-    async def _handle_cron_job(self, job: "CronJob") -> str | None:
-        """Called by CronService when a scheduled job fires."""
-        session_id = (job.payload.channel or "").strip()
-        if not session_id:
-            return None
-        agent = self.default_agent
-        cwd = self.default_cwd
-        message = job.payload.message or "Run scheduled task."
-        await self.on_user_input(
-            text=message,
-            session_id=session_id,
-            agent=agent,
-            cwd_override=cwd,
-        )
-        return None
 
     async def stop(self) -> None:
         """Stop GUI runtime."""

@@ -20,6 +20,7 @@ from .email import EMAIL_TOOL_DEFINITIONS, execute_email_tool
 from .calendar import CALENDAR_TOOL_DEFINITIONS, execute_calendar_tool
 
 if TYPE_CHECKING:
+    from agent_commander.cron.service import CronService
     from agent_commander.session.extension_store import ExtensionStore
     from agent_commander.session.skill_store import SkillStore
     from agent_commander.session.project_store import ProjectStore
@@ -427,6 +428,86 @@ TEAM_PROJECT_TOOL_DEFINITIONS = [
 ]
 
 
+CRON_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "cron_list_jobs",
+            "description": "List all scheduled cron jobs. Returns job id, name, schedule, next run time and last status.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cron_add_job",
+            "description": (
+                "Schedule a recurring or one-shot job. The job sends a message to this chat session on the given schedule. "
+                "Schedule kinds: 'every' (interval in minutes), 'cron' (cron expression like '0 9 * * *'), "
+                "'at' (one-shot at HH:MM today/tomorrow)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Human-readable job name."},
+                    "schedule_kind": {
+                        "type": "string",
+                        "enum": ["every", "cron", "at"],
+                        "description": "Type of schedule.",
+                    },
+                    "interval_minutes": {
+                        "type": "number",
+                        "description": "Interval in minutes (for 'every' kind).",
+                    },
+                    "cron_expr": {
+                        "type": "string",
+                        "description": "Cron expression (for 'cron' kind), e.g. '0 9 * * *'.",
+                    },
+                    "at_time": {
+                        "type": "string",
+                        "description": "Time as HH:MM (for 'at' kind). Runs once today or tomorrow.",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "The prompt/message to send when the job fires.",
+                    },
+                },
+                "required": ["name", "schedule_kind", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cron_remove_job",
+            "description": "Remove a scheduled job by its ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "The job ID to remove."},
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cron_enable_job",
+            "description": "Enable or disable a scheduled job.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "The job ID."},
+                    "enabled": {"type": "boolean", "description": "True to enable, false to disable."},
+                },
+                "required": ["job_id", "enabled"],
+            },
+        },
+    },
+]
+
+
 def execute_tool(
     name: str,
     arguments_json: str,
@@ -435,6 +516,8 @@ def execute_tool(
     active_extension_ids: list[str] | None = None,
     skill_store: "SkillStore | None" = None,
     project_store: "ProjectStore | None" = None,
+    cron_service: "CronService | None" = None,
+    session_id: str | None = None,
 ) -> str:
     """Execute a tool by name and return the result as a string."""
     try:
@@ -506,6 +589,25 @@ def execute_tool(
             return _project_set_checklist_item(
                 args.get("project_name", ""), args.get("item_text", ""),
                 bool(args.get("done", False)), project_store,
+            )
+        elif name == "cron_list_jobs":
+            return _cron_list_jobs(cron_service)
+        elif name == "cron_add_job":
+            return _cron_add_job(
+                args.get("name", ""),
+                args.get("schedule_kind", ""),
+                args.get("interval_minutes"),
+                args.get("cron_expr"),
+                args.get("at_time"),
+                args.get("message", ""),
+                cron_service,
+                session_id,
+            )
+        elif name == "cron_remove_job":
+            return _cron_remove_job(args.get("job_id", ""), cron_service)
+        elif name == "cron_enable_job":
+            return _cron_enable_job(
+                args.get("job_id", ""), bool(args.get("enabled", True)), cron_service,
             )
         else:
             return f"Error: unknown tool '{name}'"
@@ -623,6 +725,125 @@ def _project_set_checklist_item(
     status = "done" if done else "not done"
     action = "marked" if matched else "added and marked"
     return f"Checklist item '{item_text}' {action} as {status} in project '{project_name}'."
+
+
+# ---------------------------------------------------------------------------
+# Cron tool implementations
+# ---------------------------------------------------------------------------
+
+
+def _cron_list_jobs(cron_service: "CronService | None") -> str:
+    if cron_service is None:
+        return "Error: cron service not available"
+    import time as _time
+    jobs = cron_service.list_jobs(include_disabled=True)
+    if not jobs:
+        return "No scheduled jobs."
+    lines = ["Scheduled jobs:\n"]
+    now_ms = int(_time.time() * 1000)
+    for j in jobs:
+        status = "enabled" if j.enabled else "disabled"
+        sched = j.schedule.kind
+        if sched == "every" and j.schedule.every_ms:
+            sched = f"every {j.schedule.every_ms // 60000}m"
+        elif sched == "cron" and j.schedule.expr:
+            sched = f"cron({j.schedule.expr})"
+        elif sched == "at" and j.schedule.at_ms:
+            sched = f"at {_time.strftime('%Y-%m-%d %H:%M', _time.localtime(j.schedule.at_ms / 1000))}"
+        next_run = ""
+        if j.state.next_run_at_ms and j.state.next_run_at_ms > now_ms:
+            delta_s = (j.state.next_run_at_ms - now_ms) // 1000
+            if delta_s < 120:
+                next_run = f" (next: {delta_s}s)"
+            else:
+                next_run = f" (next: {delta_s // 60}m)"
+        last = f" last: {j.state.last_status}" if j.state.last_status else ""
+        lines.append(f"- [{j.id}] **{j.name}** — {sched} [{status}]{next_run}{last}")
+        if j.payload.message:
+            lines.append(f"  message: {j.payload.message[:80]}")
+    return "\n".join(lines)
+
+
+def _cron_add_job(
+    name: str,
+    schedule_kind: str,
+    interval_minutes: float | None,
+    cron_expr: str | None,
+    at_time: str | None,
+    message: str,
+    cron_service: "CronService | None",
+    session_id: str | None,
+) -> str:
+    if cron_service is None:
+        return "Error: cron service not available"
+    if not name:
+        return "Error: name is required"
+    if not message:
+        return "Error: message is required"
+
+    from agent_commander.cron.types import CronSchedule
+
+    delete_after_run = False
+
+    if schedule_kind == "every":
+        if not interval_minutes or interval_minutes <= 0:
+            return "Error: interval_minutes must be positive for 'every' schedule"
+        schedule = CronSchedule(kind="every", every_ms=int(interval_minutes * 60 * 1000))
+    elif schedule_kind == "cron":
+        if not cron_expr:
+            return "Error: cron_expr is required for 'cron' schedule"
+        schedule = CronSchedule(kind="cron", expr=cron_expr)
+    elif schedule_kind == "at":
+        if not at_time:
+            return "Error: at_time (HH:MM) is required for 'at' schedule"
+        import time as _time
+        from datetime import datetime, timedelta
+        try:
+            parts = at_time.split(":")
+            hour, minute = int(parts[0]), int(parts[1])
+            now = datetime.now()
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            schedule = CronSchedule(kind="at", at_ms=int(target.timestamp() * 1000))
+            delete_after_run = True
+        except Exception:
+            return f"Error: invalid at_time format '{at_time}', expected HH:MM"
+    else:
+        return f"Error: unknown schedule_kind '{schedule_kind}'. Use 'every', 'cron', or 'at'."
+
+    channel = session_id or ""
+    job = cron_service.add_job(
+        name=name,
+        schedule=schedule,
+        message=message,
+        channel=channel,
+        delete_after_run=delete_after_run,
+    )
+    return f"Job '{name}' created (id: {job.id}, schedule: {schedule_kind}, channel: {channel})"
+
+
+def _cron_remove_job(job_id: str, cron_service: "CronService | None") -> str:
+    if cron_service is None:
+        return "Error: cron service not available"
+    if not job_id:
+        return "Error: job_id is required"
+    removed = cron_service.remove_job(job_id)
+    if removed:
+        return f"Job '{job_id}' removed."
+    return f"Error: job '{job_id}' not found."
+
+
+def _cron_enable_job(job_id: str, enabled: bool, cron_service: "CronService | None") -> str:
+    if cron_service is None:
+        return "Error: cron service not available"
+    if not job_id:
+        return "Error: job_id is required"
+    job = cron_service.enable_job(job_id, enabled)
+    if job:
+        state = "enabled" if enabled else "disabled"
+        return f"Job '{job.name}' ({job_id}) {state}."
+    return f"Error: job '{job_id}' not found."
 
 
 def _resolve_path(raw_path: str, cwd: str | None) -> Path:

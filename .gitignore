@@ -42,3 +42,9 @@ REFACTOR_PLAN.md
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Temp / build artifacts
+tmp*/
+*.zip
+nuitka-crash-report.xml
+build/agent_commander/

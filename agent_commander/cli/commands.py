@@ -441,6 +441,7 @@ def gui(
             extension_store=extension_store,
             skill_store=skill_store,
             project_store=project_store,
+            cron_service=cron_service,
         )
     else:
         cli_provider = CLIAgentProvider(
@@ -466,6 +467,7 @@ def gui(
         workspace=workspace,
         default_agent=selected_agent,
         cli_provider=cli_provider,
+        cron_service=cron_service,
         stream_callback=stream_callback,
         terminal_callback=terminal_callback,
         tool_start_callback=tool_start_callback,
