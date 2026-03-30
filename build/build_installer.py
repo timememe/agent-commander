@@ -172,6 +172,17 @@ def copy_cliproxyapi() -> None:
         log("Created default config.yaml in dist")
 
 
+def copy_app_icon() -> None:
+    """Copy app icon next to AgentCommander.exe so find_icon() can locate it."""
+    for name in ("logo_w.ico", "logo_w.png", "agent_commander_logo.png"):
+        src = PROJECT_ROOT / name
+        if src.is_file():
+            shutil.copy2(str(src), str(DIST_APP_DIR / name))
+            log_ok(f"Copied {name} next to exe")
+            return
+    log("No app icon found — window will use default icon")
+
+
 def copy_workspace_templates() -> None:
     """Copy workspace templates into dist/_internal/workspace/."""
     src = PROJECT_ROOT / "workspace"
@@ -282,7 +293,10 @@ def main() -> int:
     # Step 3: Copy CLIProxyAPI
     copy_cliproxyapi()
 
-    # Step 4: Copy workspace templates
+    # Step 4: Copy app icon next to exe
+    copy_app_icon()
+
+    # Step 5: Copy workspace templates
     copy_workspace_templates()
 
     # Step 5: Inno Setup (optional)

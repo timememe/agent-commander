@@ -1,18 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for Agent Commander GUI (Qt backend)."""
+"""PyInstaller spec for Agent Commander GUI — macOS .app bundle.
+
+Run from project root:
+    pyinstaller build/build_macos.spec
+
+Requirements:
+    pip install pyinstaller
+    # Place macOS cli-proxy-api binary at:
+    #   cliproxyapi/cli-proxy-api   (built on Mac from CLIProxyAPI source)
+    # Optionally place icon at:
+    #   logo_w.icns                 (convert from logo_w.ico: sips / iconutil)
+"""
 
 import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all
 
-# Project root (one level up from build/)
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(SPECPATH).parent.resolve()
 
 # ---------------------------------------------------------------------------
-# Collect only the PySide6 modules we actually use
-# (QtCore, QtGui, QtWidgets — skip WebEngine, Multimedia, 3D, etc.)
+# PySide6 — only the three modules we actually use (saves ~400MB vs full)
 # ---------------------------------------------------------------------------
 pyside6_datas, pyside6_binaries, pyside6_hiddenimports = [], [], []
 for _mod in ("PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets"):
@@ -22,59 +34,63 @@ for _mod in ("PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets"):
     pyside6_hiddenimports += _h
 
 # ---------------------------------------------------------------------------
-# Skill markdown/shell files (agent_commander/skills/**/*)
+# Skill markdown/shell files
 # ---------------------------------------------------------------------------
 skills_datas = []
 skills_root = PROJECT_ROOT / "agent_commander" / "skills"
 if skills_root.exists():
     for path in skills_root.rglob("*"):
         if path.is_file():
-            rel = path.relative_to(PROJECT_ROOT)
-            dest = str(rel.parent)
+            dest = str(path.relative_to(PROJECT_ROOT).parent)
             skills_datas.append((str(path), dest))
 
 # ---------------------------------------------------------------------------
-# Workspace templates (workspace/**/*)
+# Workspace templates
 # ---------------------------------------------------------------------------
 workspace_datas = []
 workspace_root = PROJECT_ROOT / "workspace"
 if workspace_root.exists():
     for path in workspace_root.rglob("*"):
         if path.is_file():
-            rel = path.relative_to(PROJECT_ROOT)
-            dest = str(rel.parent)
+            dest = str(path.relative_to(PROJECT_ROOT).parent)
             workspace_datas.append((str(path), dest))
 
 # ---------------------------------------------------------------------------
-# Application icon
+# Logo (data — shown in About etc.)
 # ---------------------------------------------------------------------------
-icon_path = PROJECT_ROOT / "logo_w.ico"
-if not icon_path.exists():
-    icon_path = None
+logo_datas = []
+for logo_name in ("logo_w.icns", "logo_w.ico", "logo_w.png"):
+    logo = PROJECT_ROOT / logo_name
+    if logo.exists():
+        logo_datas.append((str(logo), "."))
+
+# ---------------------------------------------------------------------------
+# Icon for the .app bundle
+# ---------------------------------------------------------------------------
+icon_path = None
+for icon_name in ("logo_w.icns", "logo_w.ico"):
+    candidate = PROJECT_ROOT / icon_name
+    if candidate.exists():
+        icon_path = str(candidate)
+        break
+
+# ---------------------------------------------------------------------------
+# CLIProxyAPI binary (macOS, built separately on Mac)
+# Must be placed at:  {project_root}/cliproxyapi/cli-proxy-api
+# ---------------------------------------------------------------------------
+cliproxy_binaries = []
+proxy_bin = PROJECT_ROOT / "cliproxyapi" / "cli-proxy-api"
+proxy_cfg = PROJECT_ROOT / "cliproxyapi" / "config.yaml"
+if proxy_bin.exists():
+    # Add as binary so PyInstaller preserves execute bit
+    cliproxy_binaries.append((str(proxy_bin), "cliproxyapi"))
+if proxy_cfg.exists():
+    cliproxy_datas = [(str(proxy_cfg), "cliproxyapi")]
 else:
-    icon_path = str(icon_path)
-
-logo_ico = PROJECT_ROOT / "logo_w.ico"
-logo_datas = [(str(logo_ico), ".")] if logo_ico.exists() else []
+    cliproxy_datas = []
 
 # ---------------------------------------------------------------------------
-# winpty helper executables (required for PTY sessions on Windows)
-# PyInstaller collects winpty.dll/conpty.dll but misses the .exe helpers
-# ---------------------------------------------------------------------------
-winpty_datas = []
-if sys.platform == "win32":
-    import site
-    for site_dir in site.getsitepackages():
-        winpty_pkg = Path(site_dir) / "winpty"
-        if winpty_pkg.is_dir():
-            for name in ("winpty-agent.exe", "OpenConsole.exe"):
-                p = winpty_pkg / name
-                if p.exists():
-                    winpty_datas.append((str(p), "winpty"))
-            break
-
-# ---------------------------------------------------------------------------
-# Hidden imports that PyInstaller may not detect
+# Hidden imports
 # ---------------------------------------------------------------------------
 hidden_imports = [
     "pyte",
@@ -87,12 +103,16 @@ hidden_imports = [
     "prompt_toolkit",
     "plyer",
     "plyer.platforms",
-    "plyer.platforms.win",
-    "plyer.platforms.win.notification",
+    "plyer.platforms.macosx",
+    "plyer.platforms.macosx.notification",
+    "pexpect",
+    "pexpect.popen_spawn",
     "pydantic",
     "pydantic_settings",
     "typer",
     "click",
+    "docx",
+    "openpyxl",
     "agent_commander",
     "agent_commander.cli.commands",
     "agent_commander.gui.launcher",
@@ -123,6 +143,7 @@ hidden_imports = [
     "agent_commander.cron.service",
     "agent_commander.cron.types",
     "agent_commander.heartbeat.service",
+    "agent_commander.providers.base",
     "agent_commander.providers.provider",
     "agent_commander.providers.transport.proxy_session",
     "agent_commander.providers.transport.proxy_server",
@@ -137,23 +158,14 @@ hidden_imports = [
     "agent_commander.utils.helpers",
 ]
 
-# Win-specific hidden imports
-if sys.platform == "win32":
-    hidden_imports += [
-        "win10toast",
-        "winpty",
-        "winpty.ptyprocess",
-        "winpty.enums",
-    ]
-
 # ---------------------------------------------------------------------------
 # Analysis
 # ---------------------------------------------------------------------------
 a = Analysis(
     [str(PROJECT_ROOT / "agent_commander" / "gui" / "launcher.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=pyside6_binaries,
-    datas=pyside6_datas + skills_datas + workspace_datas + logo_datas + winpty_datas,
+    binaries=pyside6_binaries + cliproxy_binaries,
+    datas=pyside6_datas + skills_datas + workspace_datas + logo_datas + cliproxy_datas,
     hiddenimports=hidden_imports + pyside6_hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -171,7 +183,9 @@ a = Analysis(
         "IPython",
         "customtkinter",
         "tkinterdnd2",
-        # Unused PySide6 submodules (saves ~500MB)
+        "win10toast",
+        "winpty",
+        # Unused PySide6 submodules
         "PySide6.QtSvg",
         "PySide6.QtWebEngine",
         "PySide6.QtWebEngineCore",
@@ -208,12 +222,12 @@ a = Analysis(
 )
 
 # ---------------------------------------------------------------------------
-# PYZ (compressed Python bytecode archive)
+# PYZ
 # ---------------------------------------------------------------------------
 pyz = PYZ(a.pure)
 
 # ---------------------------------------------------------------------------
-# EXE
+# EXE — no console window, argv_emulation for macOS dock drag-drop
 # ---------------------------------------------------------------------------
 exe = EXE(
     pyz,
@@ -223,26 +237,51 @@ exe = EXE(
     name="AgentCommander",
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=False,  # GUI app — no terminal window
+    strip=True,         # strip debug symbols → smaller binary on Mac
+    upx=False,          # UPX breaks code signing on macOS — keep OFF
+    console=False,
     disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
+    argv_emulation=True,   # handle Apple events (file open, dock drop)
+    target_arch=None,      # None = current arch; use "universal2" for fat binary
     codesign_identity=None,
     entitlements_file=None,
     icon=icon_path,
 )
 
 # ---------------------------------------------------------------------------
-# COLLECT (directory mode — faster startup than onefile)
+# COLLECT — directory bundle (used by BUNDLE below)
 # ---------------------------------------------------------------------------
 coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
-    strip=False,
-    upx=True,
+    strip=True,
+    upx=False,          # UPX + macOS code signing = broken → keep OFF
     upx_exclude=[],
     name="AgentCommander",
+)
+
+# ---------------------------------------------------------------------------
+# BUNDLE — creates AgentCommander.app
+# ---------------------------------------------------------------------------
+app = BUNDLE(
+    coll,
+    name="AgentCommander.app",
+    icon=icon_path,
+    bundle_identifier="com.agentcommander.app",
+    version="1.0.0",
+    info_plist={
+        # Allow high-resolution Retina rendering
+        "NSHighResolutionCapable": True,
+        # Required for webbrowser.open() to work in sandboxed contexts
+        "NSAppTransportSecurity": {"NSAllowsArbitraryLoads": True},
+        # Allow access to user Downloads/Documents for workspace
+        "NSDocumentsFolderUsageDescription": "Agent Commander uses this folder as workspace.",
+        "NSDownloadsFolderUsageDescription": "Agent Commander may save files here.",
+        # Minimum macOS version
+        "LSMinimumSystemVersion": "12.0",
+        # App display name in menu bar / About
+        "CFBundleDisplayName": "Agent Commander",
+        "CFBundleShortVersionString": "1.0.0",
+    },
 )

@@ -18,6 +18,8 @@ from loguru import logger
 
 from .email import EMAIL_TOOL_DEFINITIONS, execute_email_tool
 from .calendar import CALENDAR_TOOL_DEFINITIONS, execute_calendar_tool
+from .worksection import WORKSECTION_TOOL_DEFINITIONS, execute_worksection_tool
+from .google_workspace import GOOGLE_WORKSPACE_TOOL_DEFINITIONS, execute_google_workspace_tool
 
 if TYPE_CHECKING:
     from agent_commander.cron.service import CronService
@@ -332,6 +334,8 @@ TOOL_DEFINITIONS = [
     },
     *EMAIL_TOOL_DEFINITIONS,
     *CALENDAR_TOOL_DEFINITIONS,
+    *WORKSECTION_TOOL_DEFINITIONS,
+    *GOOGLE_WORKSPACE_TOOL_DEFINITIONS,
 ]
 
 # ---------------------------------------------------------------------------
@@ -608,6 +612,19 @@ def execute_tool(
         elif name == "cron_enable_job":
             return _cron_enable_job(
                 args.get("job_id", ""), bool(args.get("enabled", True)), cron_service,
+            )
+        elif name.startswith("ws_"):
+            if extension_store is None:
+                return "Error: Worksection tools require extensions (no extension_store provided)"
+            return execute_worksection_tool(
+                name=name, args=args, extension_store=extension_store,
+                active_ids=active_extension_ids,
+            )
+        elif name.startswith(("gdrive_", "gdocs_", "gsheets_", "gslides_", "gcal_")):
+            if extension_store is None:
+                return "Error: Google Workspace tools require extensions (no extension_store provided)"
+            return execute_google_workspace_tool(
+                name=name, args=args, extension_store=extension_store,
             )
         else:
             return f"Error: unknown tool '{name}'"

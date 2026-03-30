@@ -51,7 +51,7 @@ if not exist "%VENV_PY%" (
 :: -----------------------------------------------
 :: Step 3: Install/upgrade project dependencies
 :: -----------------------------------------------
-"%VENV_PY%" -c "import customtkinter" >nul 2>&1
+"%VENV_PY%" -c "import PySide6" >nul 2>&1
 if errorlevel 1 (
     echo [SETUP] Installing project dependencies...
     "%VENV_PY%" -m pip install --upgrade pip >nul 2>&1
@@ -66,11 +66,14 @@ if errorlevel 1 (
             "rich>=13.0.0" ^
             "croniter>=2.0.0" ^
             "prompt-toolkit>=3.0.0" ^
-            "customtkinter>=5.2.0" ^
+            "PySide6>=6.6.0" ^
             "pyte>=0.8.2" ^
             "plyer>=2.1.0" ^
             "win10toast>=0.9" ^
-            "pywinpty>=2.0.13"
+            "pywinpty>=2.0.13" ^
+            "python-docx>=1.0.0" ^
+            "openpyxl>=3.1.0" ^
+            "python-pptx>=1.0.0"
         if errorlevel 1 (
             echo [ERROR] Failed to install dependencies.
             pause

@@ -25,6 +25,11 @@ def _build_extension_section(ext: "ExtensionDef") -> str:
         refresh_token = ext.credentials.get("refresh_token", "")
         client_id = ext.credentials.get("client_id", "")
         client_secret = ext.credentials.get("client_secret", "")
+        gws_bin = ext.credentials.get("gws_bin", "")
+        gws_config_dir = ext.credentials.get("gws_config_dir", "")
+        services_list = ext.credentials.get("services", ["Gmail", "Drive", "Calendar", "Sheets", "Docs"])
+        services_str = ", ".join(services_list) if services_list else "Gmail, Drive, Calendar, Sheets, Docs"
+
         if refresh_token:
             creds_init = (
                 f'creds = Credentials(\n'
@@ -38,26 +43,51 @@ def _build_extension_section(ext: "ExtensionDef") -> str:
         else:
             creds_init = f'creds = Credentials(token="{token}")'
 
+        gws_section = ""
+        if gws_bin and gws_config_dir:
+            gws_env = (
+                f'env = {{\n'
+                f'    **os.environ,\n'
+                f'    "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": r"{gws_config_dir}",\n'
+                f'    "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND": "file",\n'
+                f'}}\n'
+                f'# Example: list Drive files\n'
+                f'result = subprocess.run([r"{gws_bin}", "drive", "files", "list"],\n'
+                f'    env=env, capture_output=True, text=True)\n'
+                f'# Example: list Gmail inbox\n'
+                f'result = subprocess.run([r"{gws_bin}", "gmail", "messages", "list"],\n'
+                f'    env=env, capture_output=True, text=True)'
+            )
+            gws_section = (
+                f"\n\n**Alternative — use gws CLI directly** (no Python Google packages needed):\n"
+                f"```python\n"
+                f"import os, subprocess\n"
+                f"{gws_env}\n"
+                f"```"
+            )
+
         return (
-            f"### Google — {email}\n\n"
-            f"**Active services:** Gmail, Google Drive, Google Calendar\n"
+            f"### Google Workspace — {email}\n\n"
+            f"**Active services:** {services_str}\n"
             f"**Account:** {email}\n\n"
-            f"Use this for all Google API calls"
-            f" (install if needed: `pip install google-api-python-client google-auth`):\n"
-            f"```python\n"
-            f"from google.oauth2.credentials import Credentials\n"
-            f"from google.auth.transport.requests import Request\n"
-            f"from googleapiclient.discovery import build\n\n"
-            f"{creds_init}\n"
-            f"if creds.expired and creds.refresh_token:\n"
-            f"    creds.refresh(Request())\n\n"
-            f"# Send email via Gmail:\n"
-            f"gmail = build('gmail', 'v1', credentials=creds)\n\n"
-            f"# Create/list calendar events:\n"
-            f"cal = build('calendar', 'v3', credentials=creds)\n\n"
-            f"# Access Drive files:\n"
-            f"drive = build('drive', 'v3', credentials=creds)\n"
-            f"```"
+            f"Use the built-in agent tools for ALL Google Workspace operations — "
+            f"do NOT write Python code or install packages manually:\n\n"
+            f"**Google Drive:**\n"
+            f"- `gdrive_list_files` — list files/folders (params: folder_id, query, page_size)\n"
+            f"- `gdrive_get_file_info` — get metadata for a file (params: file_id)\n"
+            f"- `gdrive_create_folder` — create a folder (params: name, parent_id)\n"
+            f"- `gdrive_delete_file` — delete a file or folder (params: file_id)\n\n"
+            f"**Google Docs:**\n"
+            f"- `gdocs_create` — create a new document (params: title, content)\n"
+            f"- `gdocs_get` — read document content (params: document_id)\n"
+            f"- `gdocs_append` — append text to document (params: document_id, text)\n\n"
+            f"**Google Sheets:**\n"
+            f"- `gsheets_create` — create a new spreadsheet (params: title)\n"
+            f"- `gsheets_read` — read a range (params: spreadsheet_id, range)\n"
+            f"- `gsheets_write` — write 2D data to a range (params: spreadsheet_id, range, values)\n"
+            f"- `gsheets_append` — append rows (params: spreadsheet_id, range, values)\n\n"
+            f"Always use these tools — never use `run_command` with gws/gcloud for data operations."
+            f"{gws_section}"
         )
 
     if provider in ("yandex", "yandex_mail"):
@@ -87,6 +117,39 @@ def _build_extension_section(ext: "ExtensionDef") -> str:
             f"r = requests.request('PROPFIND', 'https://webdav.yandex.ru/',\n"
             f"    auth=('{email}', '{app_password}'))\n"
             f"```"
+        )
+
+    if provider == "worksection_user":
+        account = ext.credentials.get("account", "").strip().rstrip("/")
+        access_token = ext.credentials.get("access_token", "")
+        account_url = f"https://{account}" if account and not account.startswith("http") else account or "https://worksection.com"
+        return (
+            f"### Worksection (User OAuth) — {account_url}\n\n"
+            f"**Account:** {account}\n"
+            f"**Access token:** {access_token}\n\n"
+            f"Use this for Worksection user-level operations via agent tools:\n"
+            f"```\n"
+            f"ws_get_projects, ws_get_tasks, ws_get_task,\n"
+            f"ws_create_task, ws_update_task, ws_add_comment\n"
+            f"```\n"
+            f"Pass `\"connection\": \"user\"` (or omit — default is user)."
+        )
+
+    if provider == "worksection_admin":
+        account = ext.credentials.get("account", "").strip().rstrip("/")
+        admin_email = ext.credentials.get("email", "")
+        account_url = f"https://{account}" if account and not account.startswith("http") else account or "https://worksection.com"
+        return (
+            f"### Worksection (Admin API) — {account_url}\n\n"
+            f"**Account:** {account}\n"
+            f"**Admin email:** {admin_email}\n\n"
+            f"Use this for full admin access via agent tools:\n"
+            f"```\n"
+            f"ws_get_projects, ws_get_tasks, ws_get_task,\n"
+            f"ws_create_task, ws_update_task, ws_add_comment,\n"
+            f"ws_get_users, ws_get_time\n"
+            f"```\n"
+            f"Pass `\"connection\": \"admin\"` to force admin auth."
         )
 
     # Generic fallback
@@ -189,6 +252,28 @@ class ExtensionStore:
 
     def _maybe_refresh_google_token(self, ext: "ExtensionDef") -> "ExtensionDef":
         """Refresh Google OAuth token if expired; saves updated credentials."""
+        # Try gws-based refresh first (no Google packages needed)
+        gws_bin = ext.credentials.get("gws_bin", "")
+        gws_config_dir = ext.credentials.get("gws_config_dir", "")
+        if gws_bin and gws_config_dir and Path(gws_bin).is_file():
+            try:
+                import os, subprocess
+                env = {
+                    **os.environ,
+                    "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": gws_config_dir,
+                    "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND": "file",
+                }
+                # gws refreshes the token automatically when making API calls;
+                # calling auth status will trigger a silent refresh if needed
+                subprocess.run(
+                    [gws_bin, "auth", "status"],
+                    env=env, capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+            return ext
+
+        # Fall back to Python Google libs
         try:
             from datetime import datetime, timezone
             from google.oauth2.credentials import Credentials  # type: ignore
